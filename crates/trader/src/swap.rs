@@ -1110,3 +1110,358 @@ async fn pumpswap_sell(
     ];
     Ok(SellQuote { tokens_in, expected_lamports_out, min_lamports_out, ixs })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fresh pump.fun curve shape: 30 SOL virtual, ~1.073e15 virtual tokens,
+    /// ~7.931e14 real tokens.
+    fn fresh_curve(creator: Pubkey) -> BondingCurve {
+        BondingCurve {
+            virtual_token_reserves: 1_073_000_000_000_000,
+            virtual_sol_reserves: 30_000_000_000,
+            real_token_reserves: 793_100_000_000_000,
+            complete: false,
+            creator,
+            is_mayhem_mode: false,
+            is_cashback_coin: false,
+            quote_mint: Pubkey::default(),
+        }
+    }
+
+    const LEGACY_FEES: FeeBasisPoints = FeeBasisPoints { lp: 25, protocol: 5, coin_creator: 5 };
+
+    // ---- compute_fee -------------------------------------------------------
+
+    #[test]
+    fn compute_fee_exact_divisions() {
+        assert_eq!(compute_fee(0, 95), 0);
+        assert_eq!(compute_fee(10_000, 25), 25);
+        assert_eq!(compute_fee(1_000_000, 95), 9_500);
+        assert_eq!(compute_fee(123, 0), 0); // zero fee never rounds up
+    }
+
+    #[test]
+    fn compute_fee_rounds_up_on_remainder() {
+        assert_eq!(compute_fee(1, 1), 1); // 0.0001 -> ceil 1
+        assert_eq!(compute_fee(10_001, 25), 26); // 25.0025 -> 26
+        assert_eq!(compute_fee(1, 10_000), 1); // 100% of 1
+    }
+
+    #[test]
+    fn compute_fee_extremes_do_not_overflow() {
+        // Full fee on u64::MAX is exact, no ceil artifact.
+        assert_eq!(compute_fee(u64::MAX as u128, 10_000), u64::MAX as u128);
+        assert_eq!(compute_fee(u128::MAX, 10_000), u128::MAX);
+        let _ = compute_fee(u128::MAX, 9_999); // must not panic
+    }
+
+    // ---- apply_slippage ----------------------------------------------------
+
+    #[test]
+    fn apply_slippage_scales_down() {
+        assert_eq!(apply_slippage(1_000, 1_500), 850);
+        assert_eq!(apply_slippage(1_000, 0), 1_000);
+        assert_eq!(apply_slippage(0, 5_000), 0);
+    }
+
+    #[test]
+    fn apply_slippage_caps_at_9999_bps() {
+        assert_eq!(apply_slippage(10_000, 9_999), 1);
+        assert_eq!(apply_slippage(10_000, 20_000), 1); // clamped, never negative
+    }
+
+    // ---- pump.fun quotes -----------------------------------------------------
+
+    #[test]
+    fn pumpfun_buy_quote_on_fresh_curve() {
+        // Non-default creator -> 95 + 30 = 125 bps.
+        let curve = fresh_curve(Pubkey::new_unique());
+        let tokens = pumpfun_expected_tokens(&curve, 20_000_000); // 0.02 SOL
+        assert!(
+            (650_000_000_000..=750_000_000_000).contains(&tokens),
+            "0.02 SOL on a fresh curve should buy ~7.06e11 tokens, got {tokens}"
+        );
+        assert!(tokens < curve.real_token_reserves);
+    }
+
+    #[test]
+    fn pumpfun_buy_quote_creator_fee_tiers() {
+        // Default creator pays only 95 bps -> more tokens than the 125 bps path.
+        let no_creator_fee = pumpfun_expected_tokens(&fresh_curve(Pubkey::default()), 20_000_000);
+        let with_creator_fee = pumpfun_expected_tokens(&fresh_curve(Pubkey::new_unique()), 20_000_000);
+        assert!(no_creator_fee > with_creator_fee);
+    }
+
+    #[test]
+    fn pumpfun_buy_quote_capped_by_real_reserves() {
+        let mut curve = fresh_curve(Pubkey::default());
+        curve.real_token_reserves = 1;
+        assert_eq!(pumpfun_expected_tokens(&curve, 20_000_000), 1);
+    }
+
+    #[test]
+    fn pumpfun_buy_quote_zero_edges() {
+        assert_eq!(pumpfun_expected_tokens(&fresh_curve(Pubkey::default()), 0), 0);
+        let mut empty = fresh_curve(Pubkey::default());
+        empty.virtual_token_reserves = 0;
+        assert_eq!(pumpfun_expected_tokens(&empty, 20_000_000), 0);
+    }
+
+    #[test]
+    fn pumpfun_sell_quote_round_trips_fresh_curve() {
+        // Selling back the ~7e11 tokens a 0.02 SOL buy gets returns ~0.0194 SOL
+        // (gross ~0.0196 minus 95 bps).
+        let curve = fresh_curve(Pubkey::default());
+        let tokens = pumpfun_expected_tokens(&curve, 20_000_000);
+        let sol = pumpfun_expected_sol_out(&curve, tokens);
+        assert!(
+            (18_000_000..=20_000_000).contains(&sol),
+            "round-trip should return ~0.019 SOL, got {sol}"
+        );
+        assert!(sol < 20_000_000, "fees and price impact make the round-trip lossy");
+    }
+
+    #[test]
+    fn pumpfun_sell_quote_zero_edges() {
+        assert_eq!(pumpfun_expected_sol_out(&fresh_curve(Pubkey::default()), 0), 0);
+        let mut empty = fresh_curve(Pubkey::default());
+        empty.virtual_token_reserves = 0;
+        assert_eq!(pumpfun_expected_sol_out(&empty, 100), 0);
+    }
+
+    // ---- PumpSwap quotes -----------------------------------------------------
+
+    #[test]
+    fn pumpswap_buy_quote_constant_product() {
+        // 2:1 pool, no virtual offset: eff = 100000*10000/10035 ~= 99651,
+        // input = eff - 1, base_out = 1e9 * 99650 / (2e9 + 99650) ~= 49_802.
+        let base_out =
+            pumpswap_expected_tokens(100_000, 1_000_000_000, 2_000_000_000, 0, &LEGACY_FEES)
+                .unwrap();
+        assert!((49_000..=51_000).contains(&base_out), "got {base_out}");
+    }
+
+    #[test]
+    fn pumpswap_buy_quote_fee_tiers() {
+        let legacy =
+            pumpswap_expected_tokens(100_000, 1_000_000_000, 2_000_000_000, 0, &LEGACY_FEES)
+                .unwrap();
+        let high = FeeBasisPoints { lp: 100, protocol: 50, coin_creator: 50 };
+        let hi = pumpswap_expected_tokens(100_000, 1_000_000_000, 2_000_000_000, 0, &high).unwrap();
+        assert!(hi < legacy, "higher fees must yield fewer tokens");
+
+        let free = FeeBasisPoints { lp: 0, protocol: 0, coin_creator: 0 };
+        let out = pumpswap_expected_tokens(100_000, 1_000_000_000, 2_000_000_000, 0, &free).unwrap();
+        assert!((49_900..=50_100).contains(&out), "zero-fee pool ~= 49_997, got {out}");
+    }
+
+    #[test]
+    fn pumpswap_buy_quote_virtual_quote_offset() {
+        // A negative virtual offset shrinks the effective quote reserve, so the
+        // same quote input moves the constant-product curve further: more base out.
+        let plain =
+            pumpswap_expected_tokens(100_000, 1_000_000_000, 2_000_000_000, 0, &LEGACY_FEES)
+                .unwrap();
+        let offset = pumpswap_expected_tokens(
+            100_000,
+            1_000_000_000,
+            2_000_000_000,
+            -500_000_000,
+            &LEGACY_FEES,
+        )
+        .unwrap();
+        assert!(offset > plain);
+    }
+
+    #[test]
+    fn pumpswap_quotes_reject_zero_or_invalid_reserves() {
+        assert!(pumpswap_expected_tokens(100_000, 0, 2_000_000_000, 0, &LEGACY_FEES).is_err());
+        assert!(pumpswap_expected_tokens(100_000, 1_000_000_000, 0, 0, &LEGACY_FEES).is_err());
+        // Virtual offset that zeroes the effective quote reserve.
+        assert!(pumpswap_expected_tokens(100_000, 1_000_000_000, 1_000, -1_000, &LEGACY_FEES).is_err());
+        // And one that pushes it negative.
+        assert!(pumpswap_expected_tokens(100_000, 1_000_000_000, 1_000, -2_000, &LEGACY_FEES).is_err());
+        assert!(pumpswap_expected_sol_out(100_000, 0, 2_000_000_000, 0, &LEGACY_FEES).is_err());
+        assert!(pumpswap_expected_sol_out(100_000, 1_000_000_000, 0, 0, &LEGACY_FEES).is_err());
+    }
+
+    #[test]
+    fn pumpswap_sell_quote_constant_product() {
+        // quote_out = 2e9 * 50_000 / (1e9 + 50_000) = 99_995, minus 35 bps of
+        // fees -> 99_645.
+        let sol =
+            pumpswap_expected_sol_out(50_000, 1_000_000_000, 2_000_000_000, 0, &LEGACY_FEES)
+                .unwrap();
+        assert!((99_000..=100_000).contains(&sol), "got {sol}");
+    }
+
+    #[test]
+    fn pumpswap_sell_quote_rejects_reserve_draining_output() {
+        // Selling the entire base reserve would pay out more quote than the
+        // pool really holds (virtual part is not withdrawable).
+        assert!(
+            pumpswap_expected_sol_out(1_000_000_000, 1_000_000_000, 1_000, 999_999_000, &LEGACY_FEES)
+                .is_err()
+        );
+    }
+
+    // ---- PDA derivation -----------------------------------------------------
+
+    #[test]
+    fn pumpfun_bonding_curve_pda_matches_mainnet() {
+        // Verified against mainnet: curve account owner = pump.fun program.
+        let mint = Pubkey::from_str_const("E3JvmGcGFDzhu2Cnxyeq5BRvN7HH9JZUsfAUh2v8pump");
+        let curve = pda(&[b"bonding-curve", mint.as_ref()], &PUMPFUN_PROGRAM);
+        assert_eq!(curve.to_string(), "64N8p9crJJiQpayP8hUGbRL9dqf3DikT5ccXUNNjfTx1");
+    }
+
+    #[test]
+    fn pumpswap_pool_v2_pda_is_deterministic_and_distinct() {
+        let mint = Pubkey::from_str_const("E3JvmGcGFDzhu2Cnxyeq5BRvN7HH9JZUsfAUh2v8pump");
+        let pool_v2 = pda(&[b"pool-v2", mint.as_ref()], &AMM_PROGRAM);
+        assert_eq!(pool_v2, pda(&[b"pool-v2", mint.as_ref()], &AMM_PROGRAM));
+        assert_ne!(pool_v2, Pubkey::default());
+        assert_ne!(pool_v2, pda(&[b"bonding-curve", mint.as_ref()], &PUMPFUN_PROGRAM));
+        // Same seed under the wrong program must not collide.
+        assert_ne!(pool_v2, pda(&[b"pool-v2", mint.as_ref()], &PUMPFUN_PROGRAM));
+    }
+
+    #[test]
+    fn creator_vault_pda_depends_on_creator_and_seed_spelling() {
+        let c1 = Pubkey::new_unique();
+        let c2 = Pubkey::new_unique();
+        let v1 = pda(&[b"creator-vault", c1.as_ref()], &PUMPFUN_PROGRAM);
+        assert_eq!(v1, pda(&[b"creator-vault", c1.as_ref()], &PUMPFUN_PROGRAM));
+        assert_ne!(v1, pda(&[b"creator-vault", c2.as_ref()], &PUMPFUN_PROGRAM));
+        // pump.fun uses "creator-vault", PumpSwap uses "creator_vault" — a
+        // one-character seed difference must yield different addresses.
+        assert_ne!(v1, pda(&[b"creator_vault", c1.as_ref()], &AMM_PROGRAM));
+    }
+
+    // ---- discriminators / instruction data layout ---------------------------
+
+    #[test]
+    fn discriminator_constants_match_reference_sdk() {
+        // Pinned against 0xfnzero/sol-trade-sdk @ main (anchor sighashes).
+        assert_eq!(PUMPFUN_BUY_EXACT_SOL_IN_DISCRIMINATOR, [56, 252, 116, 8, 158, 223, 205, 95]);
+        assert_eq!(PUMPFUN_SELL_DISCRIMINATOR, [51, 230, 133, 164, 1, 127, 131, 173]);
+        assert_eq!(PUMPSWAP_BUY_EXACT_QUOTE_IN_DISCRIMINATOR, [198, 46, 21, 82, 180, 217, 232, 112]);
+        assert_eq!(POOL_DISCRIMINATOR, [241, 154, 109, 4, 17, 177, 109, 188]);
+        assert_eq!(PUMPSWAP_FEE_CONFIG_DISCRIMINATOR, [143, 52, 146, 187, 219, 123, 76, 155]);
+        // Both programs anchor their sell as `global:sell` -> identical sighash.
+        assert_eq!(PUMPSWAP_SELL_DISCRIMINATOR, PUMPFUN_SELL_DISCRIMINATOR);
+    }
+
+    // ---- account decoding (u64 LE fixtures mirror the ix data encoding) -----
+
+    #[test]
+    fn parse_bonding_curve_reads_reference_layout() {
+        let mut data = vec![0u8; 115];
+        data[..8].copy_from_slice(&[1u8; 8]); // discriminator (not checked)
+        data[8..16].copy_from_slice(&1_073_000_000_000_000u64.to_le_bytes());
+        data[16..24].copy_from_slice(&30_000_000_000u64.to_le_bytes());
+        data[24..32].copy_from_slice(&793_100_000_000_000u64.to_le_bytes());
+        data[48] = 1; // complete
+        let creator = Pubkey::new_unique();
+        data[49..81].copy_from_slice(creator.as_ref());
+        data[81] = 1; // is_mayhem_mode
+        let quote_mint = Pubkey::new_unique();
+        data[83..115].copy_from_slice(quote_mint.as_ref());
+
+        let c = parse_bonding_curve(&data).unwrap();
+        assert_eq!(c.virtual_token_reserves, 1_073_000_000_000_000);
+        assert_eq!(c.virtual_sol_reserves, 30_000_000_000);
+        assert_eq!(c.real_token_reserves, 793_100_000_000_000);
+        assert!(c.complete);
+        assert_eq!(c.creator, creator);
+        assert!(c.is_mayhem_mode);
+        assert!(!c.is_cashback_coin);
+        assert_eq!(c.quote_mint, quote_mint);
+    }
+
+    #[test]
+    fn parse_bonding_curve_legacy_short_layout_defaults_quote_mint() {
+        let data = vec![0u8; 83]; // predates the quote_mint field
+        let c = parse_bonding_curve(&data).unwrap();
+        assert_eq!(c.quote_mint, Pubkey::default());
+        assert!(!c.is_mayhem_mode);
+        assert!(!c.is_cashback_coin);
+    }
+
+    #[test]
+    fn decode_pool_reads_reference_layout() {
+        let mut data = vec![0u8; 261];
+        data[..8].copy_from_slice(&POOL_DISCRIMINATOR);
+        let creator = Pubkey::new_unique();
+        let base = Pubkey::new_unique();
+        let pool_base = Pubkey::new_unique();
+        let pool_quote = Pubkey::new_unique();
+        let coin_creator = Pubkey::new_unique();
+        data[11..43].copy_from_slice(creator.as_ref());
+        data[43..75].copy_from_slice(base.as_ref());
+        data[75..107].copy_from_slice(WSOL_MINT.as_ref());
+        data[139..171].copy_from_slice(pool_base.as_ref());
+        data[171..203].copy_from_slice(pool_quote.as_ref());
+        data[203..211].copy_from_slice(&123_456u64.to_le_bytes());
+        data[211..243].copy_from_slice(coin_creator.as_ref());
+        data[243] = 1; // is_mayhem_mode
+        data[245..261].copy_from_slice(&(-42i128).to_le_bytes());
+
+        let p = decode_pool(&data).unwrap();
+        assert_eq!(p.creator, creator);
+        assert_eq!(p.base_mint, base);
+        assert_eq!(p.quote_mint, WSOL_MINT);
+        assert_eq!(p.pool_base_token_account, pool_base);
+        assert_eq!(p.pool_quote_token_account, pool_quote);
+        assert_eq!(p.lp_supply, 123_456);
+        assert_eq!(p.coin_creator, coin_creator);
+        assert!(p.is_mayhem_mode);
+        assert!(!p.is_cashback_coin);
+        assert_eq!(p.virtual_quote_reserves, -42);
+    }
+
+    #[test]
+    fn decode_pool_rejects_wrong_discriminator_and_supports_legacy_len() {
+        assert!(decode_pool(&[0u8; 261]).is_err());
+        let mut legacy = vec![0u8; 244]; // predates virtual_quote_reserves
+        legacy[..8].copy_from_slice(&POOL_DISCRIMINATOR);
+        let p = decode_pool(&legacy).unwrap();
+        assert_eq!(p.virtual_quote_reserves, 0);
+    }
+
+    #[test]
+    fn decode_fee_config_reads_flat_fees_and_tiers() {
+        let mut data = vec![0u8; 8 + 1 + 32 + 24 + 4 + 40 * 2];
+        data[..8].copy_from_slice(&PUMPSWAP_FEE_CONFIG_DISCRIMINATOR);
+        // flat fees at offset 41 (8 disc + 1 bump + 32 admin)
+        data[41..49].copy_from_slice(&30u64.to_le_bytes());
+        data[49..57].copy_from_slice(&6u64.to_le_bytes());
+        data[57..65].copy_from_slice(&6u64.to_le_bytes());
+        data[65..69].copy_from_slice(&2u32.to_le_bytes()); // tier count
+        // tier 0 at 69: threshold 1_000_000, fees 25/5/5
+        data[69..85].copy_from_slice(&1_000_000u128.to_le_bytes());
+        data[85..93].copy_from_slice(&25u64.to_le_bytes());
+        data[93..101].copy_from_slice(&5u64.to_le_bytes());
+        data[101..109].copy_from_slice(&5u64.to_le_bytes());
+        // tier 1 at 109: threshold 10_000_000, fees 10/2/2
+        data[109..125].copy_from_slice(&10_000_000u128.to_le_bytes());
+        data[125..133].copy_from_slice(&10u64.to_le_bytes());
+        data[133..141].copy_from_slice(&2u64.to_le_bytes());
+        data[141..149].copy_from_slice(&2u64.to_le_bytes());
+
+        let (flat, tiers) = decode_fee_config(&data).unwrap();
+        assert_eq!((flat.lp, flat.protocol, flat.coin_creator), (30, 6, 6));
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].0, 1_000_000);
+        assert_eq!((tiers[0].1.lp, tiers[0].1.protocol, tiers[0].1.coin_creator), (25, 5, 5));
+        assert_eq!(tiers[1].0, 10_000_000);
+        assert_eq!((tiers[1].1.lp, tiers[1].1.protocol, tiers[1].1.coin_creator), (10, 2, 2));
+    }
+
+    #[test]
+    fn decode_fee_config_rejects_wrong_discriminator() {
+        assert!(decode_fee_config(&[0u8; 149]).is_none());
+    }
+}

@@ -493,3 +493,120 @@ pub fn now_unix() -> i64 {
 pub fn json_map(pairs: impl IntoIterator<Item = (String, Value)>) -> Value {
     Value::Object(Map::from_iter(pairs))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn de_f64_accepts_numbers_and_strings() {
+        assert_eq!(de_f64(json!(1.5)).unwrap(), 1.5);
+        assert_eq!(de_f64(json!(2)).unwrap(), 2.0);
+        assert_eq!(de_f64(json!("1.5")).unwrap(), 1.5);
+        assert_eq!(de_f64(json!("  2.25  ")).unwrap(), 2.25); // trimmed
+    }
+
+    #[test]
+    fn de_f64_null_and_empty_are_zero() {
+        assert_eq!(de_f64(Value::Null).unwrap(), 0.0);
+        assert_eq!(de_f64(json!("")).unwrap(), 0.0);
+        assert_eq!(de_f64(json!("   ")).unwrap(), 0.0);
+
+        #[derive(Deserialize)]
+        struct T {
+            #[serde(default, deserialize_with = "de_f64")]
+            v: f64,
+        }
+        let t: T = serde_json::from_str("{}").unwrap();
+        assert_eq!(t.v, 0.0);
+    }
+
+    #[test]
+    fn de_f64_rejects_non_decimals() {
+        assert!(de_f64(json!("abc")).is_err());
+        assert!(de_f64(json!(true)).is_err());
+        assert!(de_f64(json!([1.5])).is_err());
+    }
+
+    #[test]
+    fn de_u64_accepts_numbers_and_strings() {
+        assert_eq!(de_u64(json!(42)).unwrap(), 42);
+        assert_eq!(de_u64(json!("42")).unwrap(), 42);
+        assert_eq!(de_u64(json!("  7  ")).unwrap(), 7);
+        assert_eq!(de_u64(json!(u64::MAX)).unwrap(), u64::MAX);
+    }
+
+    #[test]
+    fn de_u64_null_is_zero() {
+        assert_eq!(de_u64(Value::Null).unwrap(), 0);
+
+        #[derive(Deserialize)]
+        struct T {
+            #[serde(default, deserialize_with = "de_u64")]
+            v: u64,
+        }
+        let t: T = serde_json::from_str("{}").unwrap();
+        assert_eq!(t.v, 0);
+    }
+
+    #[test]
+    fn de_u64_rejects_non_integers() {
+        assert!(de_u64(json!("abc")).is_err());
+        assert!(de_u64(json!(true)).is_err());
+        assert!(de_u64(json!([1])).is_err());
+    }
+
+    #[test]
+    fn infer_type_recognizes_each_event_shape() {
+        assert_eq!(
+            infer_type(&json!({"side": "buy", "trader": "t", "signature": "s"})),
+            "swap"
+        );
+        assert_eq!(
+            infer_type(&json!({"launchpad": "pumpfun", "progress_pct": "50"})),
+            "meme"
+        );
+        assert_eq!(
+            infer_type(&json!({"multiple": "4", "baseline_usd": "1000"})),
+            "surge"
+        );
+        assert_eq!(infer_type(&json!({"creator": "c", "uri": "u"})), "token_create");
+        assert_eq!(infer_type(&json!({"pool": "p", "quote_mint": "q"})), "pool_create");
+        assert_eq!(
+            infer_type(&json!({"interval": "1m", "open": "1", "close": "2"})),
+            "candle"
+        );
+        assert_eq!(infer_type(&json!({})), "other");
+        assert_eq!(infer_type(&json!({"mint": "m"})), "other");
+    }
+
+    #[test]
+    fn infer_type_ignores_null_fields_and_prefers_swap() {
+        // Null values don't count as present.
+        assert_eq!(
+            infer_type(&json!({"side": null, "trader": "t", "signature": "s"})),
+            "other"
+        );
+        // Swap wins when several shapes overlap.
+        assert_eq!(
+            infer_type(&json!({
+                "side": "buy", "trader": "t", "signature": "s",
+                "launchpad": "pumpfun", "progress_pct": "50"
+            })),
+            "swap"
+        );
+    }
+
+    #[test]
+    fn parse_typed_uses_hint_and_infers_shape() {
+        // Hint injected when the payload omits `type`.
+        let ev = DexEvent::parse_typed(r#"{"mint":"m","side":"buy"}"#, "swap");
+        assert!(matches!(ev, DexEvent::Swap(_)));
+        // No hint: shape inference kicks in.
+        let ev = DexEvent::parse(r#"{"side":"buy","trader":"t","signature":"s","mint":"m"}"#);
+        assert!(matches!(ev, DexEvent::Swap(_)));
+        // Garbage stays garbage.
+        assert!(matches!(DexEvent::parse("not json"), DexEvent::Other(Value::Null)));
+    }
+}

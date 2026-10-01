@@ -289,3 +289,174 @@ fn detect_dex(
     }
     String::new()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solami::geyser::{SubscribeUpdateTransaction, SubscribeUpdateTransactionInfo};
+    use solami::solana::storage::confirmed_block::{
+        Message, TokenBalance, Transaction, TransactionStatusMeta, UiTokenAmount,
+    };
+
+    const WALLET: &str = "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf";
+    const MINT: &str = "E3JvmGcGFDzhu2Cnxyeq5BRvN7HH9JZUsfAUh2v8pump";
+    const PUMPSWAP_PROGRAM: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
+
+    fn b58(s: &str) -> Vec<u8> {
+        bs58::decode(s).into_vec().unwrap()
+    }
+
+    fn token_balance(account_index: u32, mint: &str, owner: &str, amount: u64) -> TokenBalance {
+        TokenBalance {
+            account_index,
+            mint: mint.to_owned(),
+            ui_token_amount: Some(UiTokenAmount {
+                ui_amount: 0.0,
+                decimals: 6,
+                amount: amount.to_string(),
+                ui_amount_string: String::new(),
+            }),
+            owner: owner.to_owned(),
+            program_id: String::new(),
+        }
+    }
+
+    /// Transaction fixture: WALLET is account key 0 with the given pre/post
+    /// lamport balances; the PumpSwap program is loaded so the DEX is detected.
+    fn update(
+        pre_tokens: Vec<TokenBalance>,
+        post_tokens: Vec<TokenBalance>,
+        pre_sol: u64,
+        post_sol: u64,
+    ) -> SubscribeUpdateTransaction {
+        SubscribeUpdateTransaction {
+            transaction: Some(SubscribeUpdateTransactionInfo {
+                signature: vec![7u8; 64],
+                is_vote: false,
+                transaction: Some(Transaction {
+                    signatures: vec![],
+                    message: Some(Message {
+                        account_keys: vec![b58(WALLET)],
+                        ..Default::default()
+                    }),
+                }),
+                meta: Some(TransactionStatusMeta {
+                    pre_balances: vec![pre_sol],
+                    post_balances: vec![post_sol],
+                    pre_token_balances: pre_tokens,
+                    post_token_balances: post_tokens,
+                    loaded_writable_addresses: vec![b58(PUMPSWAP_PROGRAM)],
+                    ..Default::default()
+                }),
+                index: 0,
+            }),
+            slot: 42,
+        }
+    }
+
+    fn smart_set() -> HashSet<String> {
+        HashSet::from([WALLET.to_owned()])
+    }
+
+    #[test]
+    fn buy_detected_when_tokens_increase_and_sol_decreases() {
+        let tx = update(
+            vec![],
+            vec![token_balance(3, MINT, WALLET, 1_000)],
+            1_000_000_000,
+            900_000_000,
+        );
+        let buys = parse_wallet_buys(&tx, &smart_set());
+        assert_eq!(buys.len(), 1);
+        let buy = &buys[0];
+        assert_eq!(buy.wallet, WALLET);
+        assert_eq!(buy.mint, MINT);
+        assert!((buy.sol_spent - 0.1).abs() < 1e-9, "sol_spent = {}", buy.sol_spent);
+        assert_eq!(buy.slot, 42);
+        assert_eq!(buy.dex, "pumpswap");
+        assert_eq!(buy.signature, bs58::encode([7u8; 64]).into_string());
+    }
+
+    #[test]
+    fn buy_detected_when_wsol_decreases() {
+        // Quote spent via WSOL token account instead of native SOL.
+        let tx = update(
+            vec![token_balance(2, WSOL, WALLET, 500_000_000)],
+            vec![
+                token_balance(2, WSOL, WALLET, 0),
+                token_balance(3, MINT, WALLET, 1_000),
+            ],
+            1_000_000_000,
+            1_000_000_000,
+        );
+        let buys = parse_wallet_buys(&tx, &smart_set());
+        assert_eq!(buys.len(), 1);
+        assert!((buys[0].sol_spent - 0.5).abs() < 1e-9, "sol_spent = {}", buys[0].sol_spent);
+    }
+
+    #[test]
+    fn airdrop_is_not_a_buy() {
+        // Tokens arrive but no SOL/quote leaves the wallet.
+        let tx = update(
+            vec![],
+            vec![token_balance(3, MINT, WALLET, 1_000)],
+            1_000_000_000,
+            1_000_000_000,
+        );
+        assert!(parse_wallet_buys(&tx, &smart_set()).is_empty());
+    }
+
+    #[test]
+    fn sell_is_not_a_buy() {
+        let tx = update(
+            vec![token_balance(3, MINT, WALLET, 1_000)],
+            vec![token_balance(3, MINT, WALLET, 0)],
+            1_000_000_000,
+            1_100_000_000,
+        );
+        assert!(parse_wallet_buys(&tx, &smart_set()).is_empty());
+    }
+
+    #[test]
+    fn balances_of_other_wallets_are_ignored() {
+        let tx = update(
+            vec![],
+            vec![token_balance(3, MINT, "someone-else", 1_000)],
+            1_000_000_000,
+            900_000_000,
+        );
+        assert!(parse_wallet_buys(&tx, &smart_set()).is_empty());
+    }
+
+    #[test]
+    fn missing_meta_or_transaction_yields_no_buys() {
+        let mut tx = update(vec![], vec![token_balance(3, MINT, WALLET, 1_000)], 1_000_000_000, 0);
+        tx.transaction.as_mut().unwrap().meta = None;
+        assert!(parse_wallet_buys(&tx, &smart_set()).is_empty());
+
+        let empty = SubscribeUpdateTransaction { transaction: None, slot: 1 };
+        assert!(parse_wallet_buys(&empty, &smart_set()).is_empty());
+    }
+
+    #[test]
+    fn raw_amount_parses_string_amount() {
+        assert_eq!(raw_amount(&token_balance(0, MINT, WALLET, 12_345)), 12_345);
+        let mut b = token_balance(0, MINT, WALLET, 1);
+        b.ui_token_amount = None;
+        assert_eq!(raw_amount(&b), 0);
+        let mut b = token_balance(0, MINT, WALLET, 1);
+        b.ui_token_amount.as_mut().unwrap().amount = "not-a-number".to_owned();
+        assert_eq!(raw_amount(&b), 0);
+    }
+
+    #[test]
+    fn detect_dex_prefers_specific_venue_over_jupiter() {
+        let meta = TransactionStatusMeta {
+            loaded_writable_addresses: vec![b58(PUMPSWAP_PROGRAM)],
+            ..Default::default()
+        };
+        let keys = vec!["JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4".to_owned()];
+        assert_eq!(detect_dex(&keys, &meta), "pumpswap");
+        assert_eq!(detect_dex(&[], &TransactionStatusMeta::default()), "");
+    }
+}

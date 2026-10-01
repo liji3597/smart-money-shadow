@@ -30,6 +30,12 @@ const NO_SIGNAL_MINTS: &[&str] = &[
     "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs", // WETH (Wormhole)
 ];
 
+/// Whether a mint is allowed to trigger a signal (quote currencies and blue
+/// chips never are).
+fn is_signable_mint(mint: &str) -> bool {
+    !NO_SIGNAL_MINTS.contains(&mint)
+}
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub min_smart_buy_usd: f64,
@@ -394,7 +400,7 @@ impl Engine {
         price: f64,
         dex: &str,
     ) {
-        if NO_SIGNAL_MINTS.contains(&mint) {
+        if !is_signable_mint(mint) {
             return;
         }
         let now = now_unix();
@@ -590,5 +596,30 @@ impl Engine {
             return Ok(None);
         }
         Ok(Some(top10 as f64 / supply_raw * 100.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_currencies_and_blue_chips_never_signal() {
+        for mint in NO_SIGNAL_MINTS {
+            assert!(!is_signable_mint(mint), "{mint} must not signal");
+        }
+    }
+
+    #[test]
+    fn regular_mints_are_signable() {
+        assert!(is_signable_mint("E3JvmGcGFDzhu2Cnxyeq5BRvN7HH9JZUsfAUh2v8pump"));
+        assert!(is_signable_mint("some-random-mint"));
+    }
+
+    #[test]
+    fn signability_is_case_and_whitespace_sensitive() {
+        // Exact-match filter: a near-miss is not filtered.
+        assert!(is_signable_mint("So11111111111111111111111111111111111111112 "));
+        assert!(is_signable_mint("so11111111111111111111111111111111111111112"));
     }
 }
