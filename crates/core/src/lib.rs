@@ -381,6 +381,12 @@ pub struct TradeRecord {
     pub landed_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Realized PnL in SOL — set on sell records (dry_sell / live_sell).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realized_pnl_sol: Option<f64>,
+    /// Exit reason for sell records: take_profit | stop_loss | time_stop | price_unknown | sell_failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub at: i64,
 }
 

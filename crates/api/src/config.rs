@@ -22,6 +22,10 @@ pub struct Config {
     pub slippage_bps: u64,
     pub priority_fee_microlamports: u64,
     pub dry_run_quote: bool,
+    pub take_profit_pct: f64,
+    pub stop_loss_pct: f64,
+    pub max_hold_secs: i64,
+    pub position_check_secs: i64,
     /// "ws" (default, delivers every event type) or "grpc".
     pub stream_transport: String,
     /// Track smart-money wallets natively over Yellowstone gRPC.
@@ -63,6 +67,10 @@ impl Config {
             slippage_bps: env_u64("SLIPPAGE_BPS", 1500),
             priority_fee_microlamports: env_u64("PRIORITY_FEE_MICROLAMPORTS", 50_000),
             dry_run_quote: env_bool("DRY_RUN_QUOTE", true),
+            take_profit_pct: env_f64("TAKE_PROFIT_PCT", 50.0),
+            stop_loss_pct: env_f64("STOP_LOSS_PCT", -30.0),
+            max_hold_secs: env_i64("MAX_HOLD_SECS", 86_400),
+            position_check_secs: env_i64("POSITION_CHECK_SECS", 60),
             stream_transport: env_or("STREAM_TRANSPORT", "ws"),
             grpc_wallet_track: env_bool("GRPC_WALLET_TRACK", true),
             pnl_track: env_bool("PNL_TRACK", true),

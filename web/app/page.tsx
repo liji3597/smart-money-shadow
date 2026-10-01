@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   fetchMetrics,
   fetchPerformance,
+  fetchPositions,
   fetchSignals,
   fetchTokens,
   fetchTrades,
@@ -13,6 +14,8 @@ import type {
   DexEvent,
   Metrics,
   PerformanceStats,
+  Position,
+  Positions,
   Signal,
   TokenInfo,
   TradeRecord,
@@ -21,6 +24,7 @@ import type {
 import { fmtUsd, shorten } from "@/lib/format";
 import MetricsBar from "@/components/MetricsBar";
 import PerformancePanel from "@/components/PerformancePanel";
+import PositionsPanel from "@/components/PositionsPanel";
 import SignalFeed from "@/components/SignalFeed";
 import TokenBoard from "@/components/TokenBoard";
 import TradeList from "@/components/TradeList";
@@ -37,6 +41,7 @@ export default function Dashboard() {
   const [signals, setSignals] = useState<Signal[]>([]);
   const [tokens, setTokens] = useState<TokenInfo[]>([]);
   const [trades, setTrades] = useState<TradeRecord[]>([]);
+  const [positions, setPositions] = useState<Positions>({ open: [], closed: [] });
   const [ticker, setTicker] = useState<TickerItem[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   const [flashIds, setFlashIds] = useState<ReadonlySet<string>>(new Set());
@@ -89,6 +94,9 @@ export default function Dashboard() {
     fetchTrades(50)
       .then((t) => alive && setTrades(t.slice(0, MAX_TRADES)))
       .catch(() => {});
+    fetchPositions()
+      .then((p) => alive && setPositions(p))
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -110,7 +118,8 @@ export default function Dashboard() {
   }, []);
 
   // performance polling every 30s (backend backfills in 60s rounds);
-  // re-fetch signals alongside so PnL badges pick up backfilled values
+  // re-fetch signals alongside so PnL badges pick up backfilled values;
+  // positions ride along so last-seen prices stay fresh
   useEffect(() => {
     let alive = true;
     const load = () => {
@@ -119,6 +128,9 @@ export default function Dashboard() {
         .catch(() => {});
       fetchSignals(50)
         .then((s) => alive && setSignals(s.slice(0, MAX_SIGNALS)))
+        .catch(() => {});
+      fetchPositions()
+        .then((p) => alive && setPositions(p))
         .catch(() => {});
     };
     load();
@@ -315,6 +327,7 @@ export default function Dashboard() {
             setMetrics(msg.data.metrics);
             setSignals(msg.data.signals.slice(0, MAX_SIGNALS));
             setTrades(msg.data.trades.slice(0, MAX_TRADES));
+            setPositions(msg.data.positions);
             break;
           case "signal":
             setSignals((prev) =>
@@ -326,6 +339,19 @@ export default function Dashboard() {
             break;
           case "trade":
             setTrades((prev) => [msg.data, ...prev].slice(0, MAX_TRADES));
+            break;
+          case "position":
+            setPositions((prev) => {
+              const p: Position = msg.data;
+              if (p.status.state === "open") {
+                const rest = prev.open.filter((o) => o.mint !== p.mint);
+                return { ...prev, open: [p, ...rest] };
+              }
+              return {
+                open: prev.open.filter((o) => o.mint !== p.mint),
+                closed: [p, ...prev.closed.filter((c) => c.signal_id !== p.signal_id)].slice(0, 100),
+              };
+            });
             break;
           case "event":
             applyEvent(msg.data);
@@ -392,7 +418,14 @@ export default function Dashboard() {
         <div className="lg:col-span-2">
           <SignalFeed signals={signals} flashIds={flashIds} onCopy={copy} />
         </div>
-        <TradeList trades={trades} onCopy={copy} />
+        <div className="flex flex-col gap-4">
+          <PositionsPanel
+            open={positions.open}
+            closed={positions.closed}
+            onCopy={copy}
+          />
+          <TradeList trades={trades} onCopy={copy} />
+        </div>
         <div className="lg:col-span-3">
           <TokenBoard tokens={tokens} onCopy={copy} />
         </div>

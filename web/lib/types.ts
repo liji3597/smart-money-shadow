@@ -84,12 +84,40 @@ export interface TokenInfo {
 export interface TradeRecord {
   signal_id: string;
   mint: string;
-  mode: string; // "dry_run" | "skipped_budget" | "live"
+  mode: string; // "dry_run" | "dry_sell" | "live" | "live_sell" | "skipped_*" | "live_error"
   sol_amount: number;
   signature?: string;
   landed_ms?: number;
   error?: string;
+  realized_pnl_sol?: number;
+  reason?: string;
   at: number;
+}
+
+export interface Position {
+  signal_id: string;
+  mint: string;
+  symbol?: string;
+  dex: string;
+  entry_price_usd: number;
+  sol_in: number;
+  tokens: number; // 0 = PnL tracked by price ratio only
+  opened_at: number;
+  last_price_usd?: number;
+  status:
+    | { state: "open" }
+    | {
+        state: "closed";
+        reason: string;
+        exit_price_usd?: number | null;
+        pnl_sol?: number | null;
+        closed_at: number;
+      };
+}
+
+export interface Positions {
+  open: Position[];
+  closed: Position[];
 }
 
 // DexEvent tagged union (data.type ∈ swap|token_create|pool_create|meme|graduation|surge|other).
@@ -127,13 +155,15 @@ export interface Snapshot {
   metrics: Metrics;
   signals: Signal[];
   trades: TradeRecord[];
+  positions: Positions;
 }
 
 export type WsMessage =
   | { kind: "snapshot"; data: Snapshot }
   | { kind: "event"; data: DexEvent }
   | { kind: "signal"; data: Signal }
-  | { kind: "trade"; data: TradeRecord };
+  | { kind: "trade"; data: TradeRecord }
+  | { kind: "position"; data: Position };
 
 export interface Health {
   ok: boolean;

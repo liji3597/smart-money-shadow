@@ -2,6 +2,7 @@ import type {
   Health,
   Metrics,
   PerformanceStats,
+  Positions,
   Signal,
   TokenInfo,
   TradeRecord,
@@ -38,6 +39,10 @@ export async function fetchTokens(limit = 100): Promise<TokenInfo[]> {
 export async function fetchTrades(limit = 50): Promise<TradeRecord[]> {
   const data = await get<{ trades: TradeRecord[] }>(`/api/trades?limit=${limit}`);
   return data.trades;
+}
+
+export async function fetchPositions(): Promise<Positions> {
+  return get<Positions>("/api/positions");
 }
 
 export async function fetchSmartMoney(): Promise<string[]> {

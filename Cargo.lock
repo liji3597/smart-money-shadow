@@ -3259,8 +3259,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "serde",
  "serde_json",
  "shadow-core",
+ "shadow-ingest",
  "solami",
  "solana-client",
  "solana-instruction 3.5.1",

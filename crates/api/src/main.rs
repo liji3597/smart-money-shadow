@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
 
     // trader
     let trade_store = Arc::new(TradeStore::default());
+    let position_store = Arc::new(shadow_trader::position::PositionStore::default());
     let beam_latency: Arc<AtomicU64> = engine.state.beam_latency_ms.clone();
     tokio::spawn(shadow_trader::run(
         TraderConfig {
@@ -115,10 +116,16 @@ async fn main() -> Result<()> {
             slippage_bps: cfg.slippage_bps,
             priority_fee_microlamports: cfg.priority_fee_microlamports,
             dry_run_quote: cfg.dry_run_quote,
+            take_profit_pct: cfg.take_profit_pct,
+            stop_loss_pct: cfg.stop_loss_pct,
+            max_hold_secs: cfg.max_hold_secs,
+            position_check_secs: cfg.position_check_secs,
+            blur_rest_base: cfg.blur_rest_base.clone(),
         },
         engine.state.signal_tx.subscribe(),
         trade_store.clone(),
         beam_latency,
+        position_store.clone(),
     ));
 
     // api
@@ -128,6 +135,7 @@ async fn main() -> Result<()> {
         health,
         track_health,
         trade_store,
+        position_store,
         event_tx,
         pnl,
     )
@@ -140,6 +148,7 @@ pub struct AppState {
     pub health: StreamHealth,
     pub track_health: StreamHealth,
     pub trades: Arc<TradeStore>,
+    pub positions: Arc<shadow_trader::position::PositionStore>,
     pub event_tx: broadcast::Sender<Arc<DexEvent>>,
     pub pnl: pnl::PnlTracker,
 }

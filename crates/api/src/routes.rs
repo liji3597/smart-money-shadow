@@ -31,17 +31,20 @@ use tracing::info;
 use shadow_core::{token_json, now_unix};
 use shadow_engine::Engine;
 use shadow_ingest::StreamHealth;
+use shadow_trader::position::PositionStore;
 use shadow_trader::TradeStore;
 
 use crate::pnl::PnlTracker;
 use crate::AppState;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     bind: String,
     engine: Arc<Engine>,
     health: StreamHealth,
     track_health: StreamHealth,
     trades: Arc<TradeStore>,
+    positions: Arc<PositionStore>,
     event_tx: tokio::sync::broadcast::Sender<Arc<shadow_core::DexEvent>>,
     pnl: PnlTracker,
 ) -> Result<()> {
@@ -50,6 +53,7 @@ pub async fn serve(
         health,
         track_health,
         trades,
+        positions,
         event_tx,
         pnl,
     });
@@ -62,6 +66,7 @@ pub async fn serve(
         .route("/api/tokens/{mint}", get(api_token_detail))
         .route("/api/smart-money", get(api_smart_money))
         .route("/api/trades", get(api_trades))
+        .route("/api/positions", get(api_positions))
         .route("/ws", get(ws_handler))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -174,6 +179,19 @@ async fn api_trades(State(st): State<Arc<AppState>>, Query(q): Query<Limit>) -> 
     Json(json!({ "trades": out }))
 }
 
+async fn api_positions(State(st): State<Arc<AppState>>) -> Json<Value> {
+    Json(positions_json(&st.positions))
+}
+
+fn positions_json(positions: &PositionStore) -> Value {
+    let mut open: Vec<Value> = positions.open_snapshot().iter().map(|p| json!(p)).collect();
+    open.sort_by_key(|p| {
+        std::cmp::Reverse(p.get("opened_at").and_then(|v| v.as_i64()).unwrap_or_default())
+    });
+    let closed: Vec<Value> = positions.closed_snapshot().iter().map(|p| json!(p)).collect();
+    json!({ "open": open, "closed": closed })
+}
+
 async fn ws_handler(ws: WebSocketUpgrade, State(st): State<Arc<AppState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, st))
 }
@@ -185,6 +203,7 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<AppState>) {
             "metrics": st.metrics(),
             "signals": st.engine.state.signals.read().unwrap().iter().take(50).map(|s| signal_json(&st, s)).collect::<Vec<_>>(),
             "trades": st.trades.records.read().unwrap().iter().take(50).map(|t| json!(**t)).collect::<Vec<_>>(),
+            "positions": positions_json(&st.positions),
         }
     });
     if socket
@@ -198,12 +217,14 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<AppState>) {
     let mut events = st.event_tx.subscribe();
     let mut signals = st.engine.state.signal_tx.subscribe();
     let mut trades = st.trades.tx.subscribe();
+    let mut positions = st.positions.tx.subscribe();
 
     loop {
         let frame = tokio::select! {
             e = events.recv() => e.ok().map(|e| json!({ "kind": "event", "data": &*e })),
             s = signals.recv() => s.ok().map(|s| json!({ "kind": "signal", "data": &*s })),
             t = trades.recv() => t.ok().map(|t| json!({ "kind": "trade", "data": &*t })),
+            p = positions.recv() => p.ok().map(|p| json!({ "kind": "position", "data": &*p })),
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(_)) => continue,
