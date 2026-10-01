@@ -115,6 +115,17 @@ is `TRADE_SOL_PER_SIGNAL`, hard-capped per day by `MAX_DAILY_SOL`; signals on
 other DEXes are recorded as skipped. Never trade with keys you cannot afford
 to lose.
 
+**Position management (both modes).** Every buy opens a tracked position.
+An exit loop re-prices open positions every `POSITION_CHECK_SECS` and closes
+them on take-profit (`TAKE_PROFIT_PCT`, default +50%), stop-loss
+(`STOP_LOSS_PCT`, default -30%), or time stop (`MAX_HOLD_SECS`, default 24h).
+In dry-run the sell settles at the entry→exit price ratio; live mode builds
+the matching sell instruction (pump.fun sell, or PumpSwap sell when the
+curve has graduated) sized from the actual ATA balance and lands it through
+Beam. One open position per mint — repeat signals on a held token are
+skipped. Open and closed positions are on the dashboard and at
+`/api/positions`.
+
 ## Signal quality
 
 Raw firehose in, judgement out. On a typical mainnet hour the engine sees
@@ -141,7 +152,8 @@ GET /api/tokens?limit=100       token board, most recently active first
 GET /api/tokens/{mint}
 GET /api/smart-money            tracked wallet set
 GET /api/trades?limit=50        dry-run / live trade records
-WS  /ws                         snapshot on connect, then event/signal/trade frames
+GET /api/positions              open positions (live PnL) + recently closed
+WS  /ws                         snapshot on connect, then event/signal/trade/position frames
 ```
 
 ## Roadmap
