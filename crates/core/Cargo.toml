@@ -1,0 +1,10 @@
+[package]
+name = "shadow-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Shared event, signal and metrics types for Smart-Money Shadow"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

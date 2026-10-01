@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+.env
+.env.local
+*.db
+*.db-journal
+*.jsonl
+!package.json
+node_modules/
+web/.next/
+web/out/
+.ref/

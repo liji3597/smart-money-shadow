@@ -1,0 +1,413 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  fetchMetrics,
+  fetchPerformance,
+  fetchSignals,
+  fetchTokens,
+  fetchTrades,
+  WS_URL,
+} from "@/lib/api";
+import type {
+  DexEvent,
+  Metrics,
+  PerformanceStats,
+  Signal,
+  TokenInfo,
+  TradeRecord,
+  WsMessage,
+} from "@/lib/types";
+import { fmtUsd, shorten } from "@/lib/format";
+import MetricsBar from "@/components/MetricsBar";
+import PerformancePanel from "@/components/PerformancePanel";
+import SignalFeed from "@/components/SignalFeed";
+import TokenBoard from "@/components/TokenBoard";
+import TradeList from "@/components/TradeList";
+import EventTicker, { type TickerItem } from "@/components/EventTicker";
+
+const MAX_SIGNALS = 100;
+const MAX_TRADES = 100;
+const MAX_TICKER = 40;
+const MAX_TOKENS = 100;
+
+export default function Dashboard() {
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  const [perf, setPerf] = useState<PerformanceStats | null>(null);
+  const [signals, setSignals] = useState<Signal[]>([]);
+  const [tokens, setTokens] = useState<TokenInfo[]>([]);
+  const [trades, setTrades] = useState<TradeRecord[]>([]);
+  const [ticker, setTicker] = useState<TickerItem[]>([]);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [flashIds, setFlashIds] = useState<ReadonlySet<string>>(new Set());
+  const [toast, setToast] = useState<{ id: number; msg: string } | null>(null);
+  const [clock, setClock] = useState(() => Date.now());
+
+  const tokensRef = useRef<TokenInfo[]>([]);
+  const tickerId = useRef(0);
+  const tickerBuf = useRef<TickerItem[]>([]);
+  const tokenBuf = useRef<Map<string, TokenInfo>>(new Map());
+  const toastTimer = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    tokensRef.current = tokens;
+  }, [tokens]);
+
+  const showToast = useCallback((msg: string) => {
+    window.clearTimeout(toastTimer.current);
+    setToast({ id: Date.now(), msg });
+    toastTimer.current = window.setTimeout(() => setToast(null), 2500);
+  }, []);
+
+  const copy = useCallback(
+    async (text: string) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast(`copied ${shorten(text, 6, 6)}`);
+      } catch {
+        showToast("copy failed");
+      }
+    },
+    [showToast],
+  );
+
+  // clock tick so relative timestamps stay fresh
+  useEffect(() => {
+    const t = window.setInterval(() => setClock(Date.now()), 10_000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  // initial REST loads
+  useEffect(() => {
+    let alive = true;
+    fetchSignals(50)
+      .then((s) => alive && setSignals(s.slice(0, MAX_SIGNALS)))
+      .catch(() => {});
+    fetchTokens(100)
+      .then((t) => alive && setTokens(t))
+      .catch(() => {});
+    fetchTrades(50)
+      .then((t) => alive && setTrades(t.slice(0, MAX_TRADES)))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // metrics polling every 5s
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      fetchMetrics()
+        .then((m) => alive && setMetrics(m))
+        .catch(() => {});
+    load();
+    const t = window.setInterval(load, 5000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, []);
+
+  // performance polling every 30s (backend backfills in 60s rounds);
+  // re-fetch signals alongside so PnL badges pick up backfilled values
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      fetchPerformance()
+        .then((p) => alive && setPerf(p))
+        .catch(() => {});
+      fetchSignals(50)
+        .then((s) => alive && setSignals(s.slice(0, MAX_SIGNALS)))
+        .catch(() => {});
+    };
+    load();
+    const t = window.setInterval(load, 30_000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, []);
+
+  const pushTicker = useCallback((item: TickerItem) => {
+    tickerBuf.current.push(item);
+  }, []);
+
+  // The firehose runs ~80 events/sec; flush the ticker at 1 Hz so the
+  // marquee is readable and the page doesn't re-render per event.
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      if (tickerBuf.current.length === 0) return;
+      const batch = tickerBuf.current.splice(0).reverse();
+      setTicker((prev) => [...batch, ...prev].slice(0, MAX_TICKER));
+
+      const tokBatch = [...tokenBuf.current.values()];
+      if (tokBatch.length > 0) {
+        tokenBuf.current.clear();
+        setTokens((prev) => {
+          const byMint = new Map(tokBatch.map((t) => [t.mint, t]));
+          const known = new Set(prev.map((t) => t.mint));
+          const updated = prev.map((t) => byMint.get(t.mint) ?? t);
+          const fresh = tokBatch.filter((t) => !known.has(t.mint));
+          return [...fresh.reverse(), ...updated].slice(0, MAX_TOKENS);
+        });
+      }
+    }, 1000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  const flashSignal = useCallback((id: string) => {
+    setFlashIds((prev) => new Set(prev).add(id));
+    window.setTimeout(() => {
+      setFlashIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }, 1600);
+  }, []);
+
+  const applyEvent = useCallback(
+    (ev: DexEvent) => {
+      // ticker line
+      const sym = ev.mint
+        ? (tokensRef.current.find((t) => t.mint === ev.mint)?.symbol ??
+          shorten(ev.mint))
+        : "";
+      const id = ++tickerId.current;
+      switch (ev.type) {
+        case "swap":
+          pushTicker({
+            id,
+            kind: ev.side === "sell" ? "sell" : "buy",
+            text: `${ev.side === "sell" ? "SELL" : "BUY"} ${fmtUsd(
+              ev.volume_usd ?? 0,
+            )} ${sym} on ${ev.dex ?? "?"}`,
+          });
+          break;
+        case "token_create":
+          pushTicker({
+            id,
+            kind: "new",
+            text: `NEW: ${ev.name ?? "?"} (${ev.symbol ?? sym}) on ${ev.dex ?? "?"}`,
+          });
+          break;
+        case "pool_create":
+          pushTicker({
+            id,
+            kind: "new",
+            text: `POOL: ${ev.symbol ?? sym} on ${ev.dex ?? "?"}`,
+          });
+          break;
+        case "surge":
+          pushTicker({
+            id,
+            kind: "other",
+            text: `SURGE x${ev.multiple?.toFixed(1) ?? "?"} ${sym} · ${fmtUsd(
+              ev.volume_window_usd ?? 0,
+            )}/${ev.window_secs ?? "?"}s`,
+          });
+          break;
+        case "graduation":
+          pushTicker({ id, kind: "new", text: `GRADUATED: ${sym}` });
+          break;
+        default:
+          pushTicker({
+            id,
+            kind: "other",
+            text: `${ev.type.toUpperCase()} ${sym}`,
+          });
+      }
+
+      // incremental token board updates, buffered and flushed at 1 Hz
+      if (ev.type === "swap" && ev.mint) {
+        const vol = ev.volume_usd ?? 0;
+        const now = Math.floor(Date.now() / 1000);
+        const base =
+          tokenBuf.current.get(ev.mint) ??
+          tokensRef.current.find((t) => t.mint === ev.mint);
+        const t: TokenInfo = base
+          ? { ...base }
+          : {
+              mint: ev.mint,
+              dex: "?",
+              price_usd: 0,
+              buy_volume_usd: 0,
+              sell_volume_usd: 0,
+              buy_count: 0,
+              sell_count: 0,
+              unique_traders: 0,
+              graduated: false,
+              last_activity: now,
+            };
+        if (ev.dex) t.dex = ev.dex;
+        if (ev.price_usd) t.price_usd = ev.price_usd;
+        if (ev.side === "sell") {
+          t.sell_volume_usd += vol;
+          t.sell_count += 1;
+        } else {
+          t.buy_volume_usd += vol;
+          t.buy_count += 1;
+        }
+        t.last_activity = ev.block_time ?? now;
+        tokenBuf.current.set(ev.mint, t);
+      } else if (ev.type === "token_create" && ev.mint) {
+        const now = Math.floor(Date.now() / 1000);
+        const base =
+          tokenBuf.current.get(ev.mint) ??
+          tokensRef.current.find((t) => t.mint === ev.mint);
+        const t: TokenInfo = base
+          ? { ...base }
+          : {
+              mint: ev.mint,
+              dex: "?",
+              price_usd: 0,
+              buy_volume_usd: 0,
+              sell_volume_usd: 0,
+              buy_count: 0,
+              sell_count: 0,
+              unique_traders: 0,
+              graduated: false,
+              last_activity: now,
+            };
+        if (ev.name) t.name = ev.name;
+        if (ev.symbol) t.symbol = ev.symbol;
+        if (ev.dex) t.dex = ev.dex;
+        if (ev.pool) t.pool = ev.pool;
+        if (ev.creator) t.creator = ev.creator;
+        t.created_at = t.created_at ?? ev.block_time;
+        t.last_activity = ev.block_time ?? now;
+        tokenBuf.current.set(ev.mint, t);
+      } else if (ev.type === "graduation" && ev.mint) {
+        const base =
+          tokenBuf.current.get(ev.mint) ??
+          tokensRef.current.find((t) => t.mint === ev.mint);
+        if (base) tokenBuf.current.set(ev.mint, { ...base, graduated: true });
+      }
+    },
+    [pushTicker],
+  );
+
+  // websocket with exponential backoff reconnect
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let attempts = 0;
+    let stopped = false;
+    let timer: number | undefined;
+
+    const connect = () => {
+      if (stopped) return;
+      ws = new WebSocket(WS_URL);
+      ws.onopen = () => {
+        attempts = 0;
+        setWsConnected(true);
+      };
+      ws.onmessage = (e) => {
+        let msg: WsMessage;
+        try {
+          msg = JSON.parse(e.data as string);
+        } catch {
+          return;
+        }
+        switch (msg.kind) {
+          case "snapshot":
+            setMetrics(msg.data.metrics);
+            setSignals(msg.data.signals.slice(0, MAX_SIGNALS));
+            setTrades(msg.data.trades.slice(0, MAX_TRADES));
+            break;
+          case "signal":
+            setSignals((prev) =>
+              prev.some((s) => s.id === msg.data.id)
+                ? prev
+                : [msg.data, ...prev].slice(0, MAX_SIGNALS),
+            );
+            flashSignal(msg.data.id);
+            break;
+          case "trade":
+            setTrades((prev) => [msg.data, ...prev].slice(0, MAX_TRADES));
+            break;
+          case "event":
+            applyEvent(msg.data);
+            break;
+        }
+      };
+      ws.onclose = () => {
+        setWsConnected(false);
+        if (stopped) return;
+        const delay = Math.min(30_000, 1000 * 2 ** attempts);
+        attempts += 1;
+        timer = window.setTimeout(connect, delay);
+      };
+      ws.onerror = () => {
+        ws?.close();
+      };
+    };
+
+    connect();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+      ws?.close();
+    };
+  }, [applyEvent, flashSignal]);
+
+  return (
+    <div className="min-h-screen pb-10">
+      <header className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+        <div className="flex items-center gap-3">
+          <h1 className="font-mono text-sm font-bold tracking-widest text-zinc-100">
+            SMART-MONEY <span className="text-cyan-400">SHADOW</span>
+          </h1>
+          <span className="hidden font-mono text-[10px] text-zinc-600 sm:inline">
+            solana smart money tracker
+          </span>
+        </div>
+        <div className="flex items-center gap-3 font-mono text-[11px]">
+          <span className="text-zinc-600" suppressHydrationWarning>
+            {new Date(clock).toLocaleTimeString("en-GB")}
+          </span>
+          <span
+            className={`flex items-center gap-1.5 rounded border px-2 py-0.5 ${
+              wsConnected
+                ? "border-green-500/40 bg-green-500/10 text-green-400"
+                : "border-red-500/40 bg-red-500/10 text-red-400"
+            }`}
+          >
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${
+                wsConnected ? "bg-green-400" : "bg-red-500"
+              }`}
+            />
+            WS {wsConnected ? "CONNECTED" : "RECONNECTING"}
+          </span>
+        </div>
+      </header>
+
+      <MetricsBar metrics={metrics} />
+
+      <PerformancePanel perf={perf} />
+
+      <main className="grid gap-4 px-4 lg:grid-cols-3">
+        <div className="lg:col-span-2">
+          <SignalFeed signals={signals} flashIds={flashIds} onCopy={copy} />
+        </div>
+        <TradeList trades={trades} onCopy={copy} />
+        <div className="lg:col-span-3">
+          <TokenBoard tokens={tokens} onCopy={copy} />
+        </div>
+      </main>
+
+      <EventTicker items={ticker} />
+
+      {toast && (
+        <div
+          key={toast.id}
+          className="fixed bottom-12 right-4 z-30 rounded border border-cyan-500/40 bg-[#0b1118] px-3 py-2 font-mono text-xs text-cyan-300 shadow-lg"
+        >
+          {toast.msg}
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,68 @@
+[package]
+name = "solami"
+version = "0.1.58"
+edition = "2024"
+description = "Rust SDK for Solami - Solana RPCs, gRPC streams, parsed data and transaction landing"
+license = "MIT"
+repository = "https://github.com/useSolami/solami-sdk"
+readme = "README.md"
+keywords = ["solana", "rpc", "grpc", "web3", "blockchain"]
+categories = ["api-bindings", "network-programming"]
+exclude = ["tests/", ".env", ".env.*"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bs58 = "0.5"
+rustls = { version = "0.23", features = ["ring"] }
+solana-pubkey = "4"
+solana-instruction = "3"
+solana-message = "4"
+solana-transaction = "4"
+solana-signature = "3"
+solana-keypair = "3"
+solana-signer = "3"
+solana-system-interface = { version = "3", features = ["bincode"] }
+rand = "0.9"
+tracing = "0.1"
+
+solana-client = { version = "4.2", optional = true }
+solana-transaction-status-client-types = { version = "4.2", optional = true }
+
+tonic = { version = "0.14", features = ["tls-ring", "tls-native-roots", "gzip", "zstd"], optional = true }
+tonic-prost = { version = "0.14", optional = true }
+prost = { version = "0.14", optional = true }
+prost-types = { version = "0.14", optional = true }
+tokio-stream = { version = "0.1", optional = true }
+
+quinn = { version = "0.11", optional = true }
+arc-swap = { version = "1", optional = true }
+solana-tls-utils = { version = "4.2", features = ["agave-unstable-api"], optional = true }
+bincode = { version = "1", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
+
+libc = { version = "0.2.183", optional = true }
+kanal = { version = "0.1.1", optional = true }
+
+[build-dependencies]
+tonic-prost-build = "0.14.3"
+protobuf-src = "2"
+
+[dev-dependencies]
+tokio-tungstenite = "0.28"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tonic = "0.14"
+tokio-stream = { version = "0.1", features = ["net"] }
+async-stream = "0.3"
+
+[features]
+default = ["rpc", "grpc", "beam"]
+rpc = ["dep:solana-client", "dep:solana-transaction-status-client-types"]
+grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:prost-types", "dep:tokio-stream"]
+beam = ["dep:quinn", "dep:arc-swap", "dep:solana-tls-utils", "dep:bincode", "dep:reqwest"]
+shred = ["dep:libc", "dep:kanal"]
+full = ["rpc", "grpc", "beam", "shred"]

@@ -1,0 +1,21 @@
+[package]
+name = "shadow-ingest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Solami Blur gRPC stream ingest and Blur REST client"
+
+[dependencies]
+shadow-core.workspace = true
+solami.workspace = true
+tokio.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+bs58 = "0.5"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+
+[dev-dependencies]
+dotenvy = "0.15"

@@ -1,0 +1,18 @@
+[package]
+name = "shadow-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Signal engine and risk scorer for Smart-Money Shadow"
+
+[dependencies]
+shadow-core.workspace = true
+shadow-ingest.workspace = true
+solami.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dashmap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+solana-client = "4.2"

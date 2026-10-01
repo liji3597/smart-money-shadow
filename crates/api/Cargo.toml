@@ -1,0 +1,27 @@
+[package]
+name = "shadow-api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "HTTP + WebSocket API and process entrypoint for Smart-Money Shadow"
+
+[[bin]]
+name = "shadow"
+path = "src/main.rs"
+
+[dependencies]
+shadow-core.workspace = true
+shadow-ingest.workspace = true
+shadow-engine.workspace = true
+shadow-trader.workspace = true
+solami.workspace = true
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dotenvy.workspace = true
