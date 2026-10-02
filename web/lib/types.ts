@@ -15,6 +15,7 @@ export interface Metrics {
   stream_reconnects: number;
   last_event_slot: number;
   beam_last_latency_ms: number | null;
+  signals_filtered_total?: number;
 }
 
 export interface Signal {

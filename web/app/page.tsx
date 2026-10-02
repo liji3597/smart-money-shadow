@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchMetrics,
   fetchPerformance,
@@ -22,10 +22,9 @@ import type {
   WsMessage,
 } from "@/lib/types";
 import { fmtUsd, shorten } from "@/lib/format";
-import MetricsBar from "@/components/MetricsBar";
-import PerformancePanel from "@/components/PerformancePanel";
 import PositionsPanel from "@/components/PositionsPanel";
 import SignalFeed from "@/components/SignalFeed";
+import StatusStrip from "@/components/StatusStrip";
 import TokenBoard from "@/components/TokenBoard";
 import TradeList from "@/components/TradeList";
 import EventTicker, { type TickerItem } from "@/components/EventTicker";
@@ -152,19 +151,25 @@ export default function Dashboard() {
       if (tickerBuf.current.length === 0) return;
       const batch = tickerBuf.current.splice(0).reverse();
       setTicker((prev) => [...batch, ...prev].slice(0, MAX_TICKER));
-
-      const tokBatch = [...tokenBuf.current.values()];
-      if (tokBatch.length > 0) {
-        tokenBuf.current.clear();
-        setTokens((prev) => {
-          const byMint = new Map(tokBatch.map((t) => [t.mint, t]));
-          const known = new Set(prev.map((t) => t.mint));
-          const updated = prev.map((t) => byMint.get(t.mint) ?? t);
-          const fresh = tokBatch.filter((t) => !known.has(t.mint));
-          return [...fresh.reverse(), ...updated].slice(0, MAX_TOKENS);
-        });
-      }
     }, 1000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  // Token board flushes at 0.2 Hz: the board re-renders the whole table, so
+  // a slower cadence (plus bucketed sorting in TokenBoard) keeps rows stable.
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      const tokBatch = [...tokenBuf.current.values()];
+      if (tokBatch.length === 0) return;
+      tokenBuf.current.clear();
+      setTokens((prev) => {
+        const byMint = new Map(tokBatch.map((t) => [t.mint, t]));
+        const known = new Set(prev.map((t) => t.mint));
+        const updated = prev.map((t) => byMint.get(t.mint) ?? t);
+        const fresh = tokBatch.filter((t) => !known.has(t.mint));
+        return [...fresh.reverse(), ...updated].slice(0, MAX_TOKENS);
+      });
+    }, 5000);
     return () => window.clearInterval(t);
   }, []);
 
@@ -232,7 +237,7 @@ export default function Dashboard() {
           });
       }
 
-      // incremental token board updates, buffered and flushed at 1 Hz
+      // incremental token board updates, buffered and flushed at 0.2 Hz
       if (ev.type === "swap" && ev.mint) {
         const vol = ev.volume_usd ?? 0;
         const now = Math.floor(Date.now() / 1000);
@@ -378,6 +383,15 @@ export default function Dashboard() {
     };
   }, [applyEvent, flashSignal]);
 
+  // latest risk score per mint (signals arrive newest-first) for TokenBoard
+  const riskByMint = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const s of signals) {
+      if (!m.has(s.mint)) m.set(s.mint, s.risk_score);
+    }
+    return m;
+  }, [signals]);
+
   return (
     <div className="min-h-screen pb-10">
       <header className="flex items-center justify-between border-b border-white/10 px-4 py-3">
@@ -410,24 +424,22 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <MetricsBar metrics={metrics} />
+      <StatusStrip metrics={metrics} perf={perf} />
 
-      <PerformancePanel perf={perf} />
-
-      <main className="grid gap-4 px-4 lg:grid-cols-3">
-        <div className="lg:col-span-2">
+      <main className="mt-4 grid gap-4 px-4 lg:grid-cols-10">
+        <div className="order-1 lg:order-none lg:col-span-4">
           <SignalFeed signals={signals} flashIds={flashIds} onCopy={copy} />
         </div>
-        <div className="flex flex-col gap-4">
+        <div className="order-3 lg:order-none lg:col-span-3">
+          <TokenBoard tokens={tokens} riskByMint={riskByMint} onCopy={copy} />
+        </div>
+        <div className="order-2 flex flex-col gap-4 lg:order-none lg:col-span-3">
           <PositionsPanel
             open={positions.open}
             closed={positions.closed}
             onCopy={copy}
           />
           <TradeList trades={trades} onCopy={copy} />
-        </div>
-        <div className="lg:col-span-3">
-          <TokenBoard tokens={tokens} onCopy={copy} />
         </div>
       </main>
 

@@ -1,126 +1,97 @@
+import { useMemo } from "react";
 import type { TokenInfo } from "@/lib/types";
-import { fmtPrice, fmtUsd, shorten, timeAgo } from "@/lib/format";
+import { fmtPrice, shorten } from "@/lib/format";
+
+// Sort rows by 10-second activity buckets instead of raw timestamps: a token
+// only changes position when it crosses a bucket boundary, so rows stay put
+// while their numbers refresh. JS sort is stable, so tokens inside the same
+// bucket keep their previous relative order.
+const BUCKET_SECS = 10;
+const bucketOf = (t: TokenInfo) => Math.floor(t.last_activity / BUCKET_SECS);
+
+function riskCls(score: number): string {
+  if (score < 30) return "text-green-400";
+  if (score <= 60) return "text-yellow-400";
+  return "text-red-400";
+}
 
 export default function TokenBoard({
   tokens,
+  riskByMint,
   onCopy,
 }: {
   tokens: TokenInfo[];
+  riskByMint: ReadonlyMap<string, number>;
   onCopy: (text: string) => void;
 }) {
+  const rows = useMemo(
+    () => [...tokens].sort((a, b) => bucketOf(b) - bucketOf(a)),
+    [tokens],
+  );
   return (
-    <section>
+    <section className="flex min-h-0 flex-col">
       <h2 className="mb-2 flex items-center gap-2 px-1 font-mono text-xs font-bold uppercase tracking-widest text-zinc-400">
         <span className="inline-block h-1.5 w-1.5 rounded-full bg-cyan-400" />
         Token Board
         <span className="text-zinc-600">({tokens.length})</span>
       </h2>
-      <div className="overflow-x-auto rounded-lg border border-white/10">
-        <table className="w-full min-w-[56rem] border-collapse font-mono text-xs">
-          <thead>
-            <tr className="bg-white/[0.04] text-left text-[10px] uppercase tracking-wider text-zinc-500">
-              <th className="px-3 py-2 font-medium">Token</th>
-              <th className="px-3 py-2 font-medium">DEX</th>
-              <th className="px-3 py-2 text-right font-medium">Price</th>
-              <th className="px-3 py-2 text-right font-medium">Buy Vol</th>
-              <th className="px-3 py-2 text-right font-medium">Sell Vol</th>
-              <th className="px-3 py-2 font-medium">B/S</th>
-              <th className="px-3 py-2 text-right font-medium">Traders</th>
-              <th className="px-3 py-2 font-medium">Status</th>
-              <th className="px-3 py-2 font-medium">Curve</th>
-              <th className="px-3 py-2 text-right font-medium">Active</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tokens.length === 0 && (
-              <tr>
-                <td
-                  colSpan={10}
-                  className="px-3 py-6 text-center text-zinc-600"
+      <div className="rounded-lg border border-white/10">
+        <div className="flex items-center gap-2 border-b border-white/10 bg-white/[0.04] px-2 py-1.5 font-mono text-[9px] uppercase tracking-wider text-zinc-500">
+          <span className="min-w-0 flex-1">Token</span>
+          <span className="w-16 text-right">Price</span>
+          <span className="w-12 text-center">B/S</span>
+          <span className="w-7 text-right">Rsk</span>
+        </div>
+        <div className="max-h-[46rem] overflow-y-auto">
+          {rows.length === 0 && (
+            <div className="px-2 py-6 text-center font-mono text-[11px] text-zinc-600">
+              waiting for tokens…
+            </div>
+          )}
+          {rows.map((t) => {
+            const total = t.buy_volume_usd + t.sell_volume_usd;
+            const buyPct = total > 0 ? (t.buy_volume_usd / total) * 100 : 50;
+            const risk = riskByMint.get(t.mint);
+            return (
+              <div
+                key={t.mint}
+                className="flex items-center gap-2 border-t border-white/5 px-2 py-1 font-mono text-[11px] hover:bg-white/[0.03]"
+              >
+                <button
+                  onClick={() => onCopy(t.mint)}
+                  title={`${t.mint} (click to copy)`}
+                  className="min-w-0 flex-1 cursor-pointer truncate text-left text-zinc-100 hover:text-cyan-300"
                 >
-                  waiting for tokens…
-                </td>
-              </tr>
-            )}
-            {tokens.map((t) => {
-              const total = t.buy_volume_usd + t.sell_volume_usd;
-              const buyPct = total > 0 ? (t.buy_volume_usd / total) * 100 : 50;
-              return (
-                <tr
-                  key={t.mint}
-                  className="border-t border-white/5 hover:bg-white/[0.03]"
+                  {t.graduated && (
+                    <span
+                      className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-green-400 align-middle"
+                      title="graduated"
+                    />
+                  )}
+                  {t.symbol ? `$${t.symbol}` : shorten(t.mint, 4, 4)}
+                </button>
+                <span className="w-16 shrink-0 truncate text-right text-zinc-300">
+                  {fmtPrice(t.price_usd)}
+                </span>
+                <span className="w-12 shrink-0">
+                  <span className="block h-1 w-full overflow-hidden rounded bg-red-500/40">
+                    <span
+                      className="block h-full rounded bg-green-500"
+                      style={{ width: `${buyPct}%` }}
+                    />
+                  </span>
+                </span>
+                <span
+                  className={`w-7 shrink-0 text-right ${
+                    risk == null ? "text-zinc-700" : riskCls(risk)
+                  }`}
                 >
-                  <td className="px-3 py-2">
-                    <button
-                      onClick={() => onCopy(t.mint)}
-                      title={`${t.mint} (click to copy)`}
-                      className="cursor-pointer text-left text-zinc-100 hover:text-cyan-300"
-                    >
-                      {t.symbol ? `$${t.symbol}` : shorten(t.mint, 5, 5)}
-                      {t.name && (
-                        <span className="ml-1.5 text-[10px] text-zinc-500">
-                          {t.name}
-                        </span>
-                      )}
-                    </button>
-                  </td>
-                  <td className="px-3 py-2 text-zinc-400">{t.dex}</td>
-                  <td className="px-3 py-2 text-right text-zinc-200">
-                    {fmtPrice(t.price_usd)}
-                  </td>
-                  <td className="px-3 py-2 text-right text-green-400">
-                    {fmtUsd(t.buy_volume_usd)}
-                  </td>
-                  <td className="px-3 py-2 text-right text-red-400">
-                    {fmtUsd(t.sell_volume_usd)}
-                  </td>
-                  <td className="px-3 py-2">
-                    <div className="h-1.5 w-16 overflow-hidden rounded bg-red-500/40">
-                      <div
-                        className="h-full rounded bg-green-500"
-                        style={{ width: `${buyPct}%` }}
-                      />
-                    </div>
-                  </td>
-                  <td className="px-3 py-2 text-right text-zinc-300">
-                    {t.unique_traders}
-                  </td>
-                  <td className="px-3 py-2">
-                    {t.graduated ? (
-                      <span className="rounded border border-green-500/40 bg-green-500/10 px-1.5 py-0.5 text-[10px] font-bold text-green-400">
-                        GRAD
-                      </span>
-                    ) : (
-                      <span className="text-zinc-600">—</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2">
-                    {t.progress_pct != null ? (
-                      <div className="flex items-center gap-1.5">
-                        <div className="h-1.5 w-14 overflow-hidden rounded bg-white/10">
-                          <div
-                            className="h-full rounded bg-fuchsia-400"
-                            style={{
-                              width: `${Math.min(100, t.progress_pct)}%`,
-                            }}
-                          />
-                        </div>
-                        <span className="text-[10px] text-zinc-400">
-                          {t.progress_pct.toFixed(0)}%
-                        </span>
-                      </div>
-                    ) : (
-                      <span className="text-zinc-600">—</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-right text-zinc-500">
-                    {timeAgo(t.last_activity)}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+                  {risk ?? "—"}
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </section>
   );
