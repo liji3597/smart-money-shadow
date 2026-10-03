@@ -103,9 +103,11 @@ out, min out at your slippage setting) computed from the actual on-chain
 curve/pool state. No funds required.
 
 **Beam health check.** Set `BEAM_HEALTH_CHECK=true` and provide
-`SOLAMI_TRADER_KEYPAIR` (base58). On startup the backend lands a
-1000-lamport self-transfer through Beam and reports the landing latency in
-the metrics bar — proof the write path works before real size goes through.
+`SOLAMI_TRADER_KEYPAIR` (payer, base58) plus `SOLAMI_SWQOS_KEYPAIR` (a
+registered swQoS key — create one in the Solami dashboard). On startup the
+backend lands a 1000-lamport self-transfer through Beam, waits for on-chain
+confirmation, and reports the real landing latency in the status strip —
+proof the write path works before real size goes through.
 
 **Live copy-trading.** `LIVE_TRADING=true` + `SOLAMI_TRADER_KEYPAIR`. On each
 signal from a pump.fun / PumpSwap token the trader builds the real buy
@@ -125,6 +127,32 @@ curve has graduated) sized from the actual ATA balance and lands it through
 Beam. One open position per mint — repeat signals on a held token are
 skipped. Open and closed positions are on the dashboard and at
 `/api/positions`.
+
+## Proven on mainnet
+
+The full loop — signal → real buy → take-profit sell — has been executed
+with real funds on Solana mainnet (2026-10-03), from a fresh burner wallet
+funded with 0.098 SOL:
+
+| Step | Signature | Proof |
+| --- | --- | --- |
+| Buy 0.02 SOL of a PumpSwap token on a smart-money signal | [`3qMg6maf…DTwjz`](https://solscan.io/tx/3qMg6maf6kpMZmT4eydyfTxMM1Mu9LnBS9ZkzgVLN689HfGu2G7cfNLx6nBVCYXrjXDnxxyW2yHgvFptW2nDTwjz) | 9 instructions: CU budget, wrap WSOL, 26-account PumpSwap swap, unwrap, tip |
+| Take-profit sell (+5% trigger, +0.00175 SOL realized) | [`3yCp6N82…bzaz`](https://solscan.io/tx/3yCp6N82jjdBa4CtRUErobLwFza93iwzrcMDSZFHFpRMayGMek7bUaCjJM6Cszuywjwv8jYUPbSk1khGRK8sbzaz) | Landed ~93 s after entry |
+
+Every send is independently verifiable through Beam's own tracking endpoint
+(`GET https://api.solami.dev/swqos/tx/{signature}` → `is_landed: true`),
+and the backend never trusts a send: after pushing bytes over QUIC it polls
+the signature status over Solami RPC (resending every 2 s, 30 s ceiling) so
+`landed_ms` in the logs is real confirmation time, not relay-ack time.
+
+Two integration lessons this surfaced, both handled in code:
+
+- **Beam's QUIC identity is a registered swQoS key**, not the payer wallet —
+  an unregistered keypair gets silently dropped at submission (the tx lookup
+  returns 404). Configure `SOLAMI_SWQOS_KEYPAIR` separately from
+  `SOLAMI_TRADER_KEYPAIR`.
+- **QUIC sends are fire-and-forget** by design; confirmation must come from
+  RPC polling.
 
 ## Signal quality
 
