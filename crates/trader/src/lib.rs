@@ -40,6 +40,8 @@ const COMPUTE_UNIT_LIMIT: u32 = 400_000;
 const QUOTE_CACHE_TTL_SECS: i64 = 60;
 const MAX_PRICE_FAILURES: u32 = 10;
 const MAX_SELL_ATTEMPTS: u32 = 5;
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
+const RESEND_EVERY: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct TraderConfig {
@@ -47,6 +49,9 @@ pub struct TraderConfig {
     pub sol_per_trade: f64,
     pub max_daily_sol: f64,
     pub keypair_b58: Option<String>,
+    /// Beam-over-QUIC auth identity (a registered swQoS key). Falls back to
+    /// `keypair_b58` when unset.
+    pub swqos_keypair_b58: Option<String>,
     pub beam_health_check: bool,
     pub api_key: String,
     pub log_path: String,
@@ -124,34 +129,47 @@ pub async fn run(
     beam_latency_ms: Arc<AtomicU64>,
     positions: Arc<PositionStore>,
 ) {
+    // Beam authenticates over QUIC with a registered swQoS key, which is a
+    // separate identity from the payer wallet. Falling back to the payer only
+    // works if the payer itself is registered as a swQoS key.
+    let beam_key = match (&cfg.swqos_keypair_b58, &cfg.keypair_b58) {
+        (Some(s), _) => Some(s.clone()),
+        (None, Some(k)) => {
+            warn!("SOLAMI_SWQOS_KEYPAIR missing; using payer keypair for Beam auth");
+            Some(k.clone())
+        }
+        (None, None) => None,
+    };
+
     if cfg.beam_health_check {
-        if let Some(kp) = cfg.keypair_b58.clone() {
-            let api_key = cfg.api_key.clone();
-            let latency = beam_latency_ms.clone();
-            tokio::spawn(async move {
-                match beam_health_check(&api_key, &kp).await {
-                    Ok((sig, ms)) => {
-                        latency.store(ms, Ordering::Relaxed);
-                        info!(%sig, latency_ms = ms, "beam health check landed");
+        match (cfg.keypair_b58.clone(), beam_key.clone()) {
+            (Some(kp), Some(beam)) => {
+                let api_key = cfg.api_key.clone();
+                let latency = beam_latency_ms.clone();
+                tokio::spawn(async move {
+                    match beam_health_check(&api_key, &beam, &kp).await {
+                        Ok((sig, ms)) => {
+                            latency.store(ms, Ordering::Relaxed);
+                            info!(%sig, latency_ms = ms, "beam health check landed");
+                        }
+                        Err(e) => warn!(error = %e, "beam health check failed"),
                     }
-                    Err(e) => warn!(error = %e, "beam health check failed"),
-                }
-            });
-        } else {
-            warn!("BEAM_HEALTH_CHECK set but SOLAMI_TRADER_KEYPAIR missing");
+                });
+            }
+            _ => warn!("BEAM_HEALTH_CHECK set but SOLAMI_TRADER_KEYPAIR missing"),
         }
     }
 
     let live: Option<Arc<LiveExecutor>> = if cfg.live {
-        match cfg.keypair_b58.clone() {
-            None => {
+        match (cfg.keypair_b58.clone(), beam_key.clone()) {
+            (None, _) => {
                 warn!(
                     "LIVE_TRADING=true but SOLAMI_TRADER_KEYPAIR missing; recording dry-run intents"
                 );
                 None
             }
-            Some(kp) => {
-                match solami::builder().with_rpc(&cfg.api_key).with_beam(&kp).build().await {
+            (Some(kp), Some(beam)) => {
+                match solami::builder().with_rpc(&cfg.api_key).with_beam(&beam).build().await {
                     Ok(client) => {
                         let keypair = solami::Keypair::from_base58_string(&kp);
                         info!(payer = %keypair.pubkey(), "live trading enabled via Solami Beam");
@@ -163,6 +181,9 @@ pub async fn run(
                     }
                 }
             }
+            // beam_key is only None when the payer keypair is None, which the
+            // first arm already covers.
+            (Some(_), None) => unreachable!(),
         }
     } else {
         None
@@ -583,9 +604,8 @@ async fn execute_sell(
     let tx =
         solami::Transaction::new_signed_with_payer(&ixs, Some(&payer), &[&exec.keypair], blockhash);
     let vtx = solami::VersionedTransaction::from(tx);
-    let t0 = std::time::Instant::now();
-    let signature = exec.client.land_transaction(&vtx).await.context("beam send")?;
-    Ok((signature, t0.elapsed().as_millis() as u64, quote.expected_lamports_out))
+    let (signature, ms) = beam_send_and_confirm(&exec.client, &vtx).await?;
+    Ok((signature, ms, quote.expected_lamports_out))
 }
 
 async fn dry_run_quote(
@@ -633,9 +653,40 @@ async fn execute_live(
     let tx =
         solami::Transaction::new_signed_with_payer(&ixs, Some(&payer), &[&exec.keypair], blockhash);
     let vtx = solami::VersionedTransaction::from(tx);
+    let (signature, ms) = beam_send_and_confirm(&exec.client, &vtx).await?;
+    Ok((signature, ms, quote.expected_tokens))
+}
+
+/// Send a transaction through Beam and wait until it confirms on-chain.
+///
+/// `land_transaction` only means the relay accepted the bytes over QUIC — it
+/// says nothing about inclusion (our first health check "landed" yet never
+/// appeared on-chain). So we poll the signature status over RPC, resending
+/// the same transaction every couple of seconds until it confirms, fails,
+/// or times out.
+async fn beam_send_and_confirm(
+    client: &LiveClient,
+    tx: &solami::VersionedTransaction,
+) -> Result<(solami::Signature, u64)> {
     let t0 = std::time::Instant::now();
-    let signature = exec.client.land_transaction(&vtx).await.context("beam send")?;
-    Ok((signature, t0.elapsed().as_millis() as u64, quote.expected_tokens))
+    let sig = client.land_transaction(tx).await.context("beam send")?;
+    let mut last_resend = t0;
+    loop {
+        match client.get_signature_status(&sig).await {
+            Ok(Some(Ok(()))) => return Ok((sig, t0.elapsed().as_millis() as u64)),
+            Ok(Some(Err(e))) => anyhow::bail!("tx landed but failed: {e}"),
+            Ok(None) | Err(_) => {
+                if t0.elapsed() > CONFIRM_TIMEOUT {
+                    anyhow::bail!("tx not confirmed within {CONFIRM_TIMEOUT:?}");
+                }
+                if last_resend.elapsed() >= RESEND_EVERY {
+                    let _ = client.land_transaction(tx).await;
+                    last_resend = std::time::Instant::now();
+                }
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+        }
+    }
 }
 
 /// ComputeBudget instruction: tag 2 = set_compute_unit_limit (u32),
@@ -672,10 +723,14 @@ fn append_jsonl(path: &str, rec: &TradeRecord) {
 
 /// Land a minimal self-transfer through Beam and measure landing latency.
 /// Proves the write path works against mainnet before real size goes through.
-async fn beam_health_check(api_key: &str, keypair_b58: &str) -> Result<(solami::Signature, u64)> {
+async fn beam_health_check(
+    api_key: &str,
+    beam_key_b58: &str,
+    keypair_b58: &str,
+) -> Result<(solami::Signature, u64)> {
     let client = solami::builder()
         .with_rpc(api_key)
-        .with_beam(keypair_b58)
+        .with_beam(beam_key_b58)
         .build()
         .await?;
     let payer = solami::Keypair::from_base58_string(keypair_b58);
@@ -694,7 +749,5 @@ async fn beam_health_check(api_key: &str, keypair_b58: &str) -> Result<(solami::
         blockhash,
     );
     let vtx = solami::VersionedTransaction::from(tx);
-    let t0 = std::time::Instant::now();
-    let sig = client.land_transaction(&vtx).await.context("beam send")?;
-    Ok((sig, t0.elapsed().as_millis() as u64))
+    beam_send_and_confirm(&client, &vtx).await
 }

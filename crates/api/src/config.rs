@@ -17,6 +17,10 @@ pub struct Config {
     pub trade_sol_per_signal: f64,
     pub max_daily_sol: f64,
     pub trader_keypair: Option<String>,
+    /// Solana keypair registered as a swQoS key — authenticates Beam over QUIC.
+    /// Falls back to `trader_keypair` when unset (rejected by Beam unless the
+    /// payer itself is registered).
+    pub swqos_keypair: Option<String>,
     pub beam_health_check: bool,
     pub trade_log_path: String,
     pub slippage_bps: u64,
@@ -60,6 +64,9 @@ impl Config {
             trade_sol_per_signal: env_f64("TRADE_SOL_PER_SIGNAL", 0.02),
             max_daily_sol: env_f64("MAX_DAILY_SOL", 0.2),
             trader_keypair: std::env::var("SOLAMI_TRADER_KEYPAIR")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            swqos_keypair: std::env::var("SOLAMI_SWQOS_KEYPAIR")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
             beam_health_check: env_bool("BEAM_HEALTH_CHECK", false),

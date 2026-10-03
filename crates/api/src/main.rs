@@ -110,6 +110,7 @@ async fn main() -> Result<()> {
             sol_per_trade: cfg.trade_sol_per_signal,
             max_daily_sol: cfg.max_daily_sol,
             keypair_b58: cfg.trader_keypair.clone(),
+            swqos_keypair_b58: cfg.swqos_keypair.clone(),
             beam_health_check: cfg.beam_health_check,
             api_key: cfg.api_key.clone(),
             log_path: cfg.trade_log_path.clone(),
