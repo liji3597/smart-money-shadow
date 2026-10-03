@@ -130,14 +130,16 @@ skipped. Open and closed positions are on the dashboard and at
 
 ## Proven on mainnet
 
-The full loop — signal → real buy → take-profit sell — has been executed
-with real funds on Solana mainnet (2026-10-03), from a fresh burner wallet
-funded with 0.098 SOL:
+The full loop — signal → real buy → exit sell — has been executed with real
+funds on Solana mainnet (2026-10-03), from a fresh burner wallet funded with
+0.098 SOL. Both exit paths fired for real:
 
 | Step | Signature | Proof |
 | --- | --- | --- |
 | Buy 0.02 SOL of a PumpSwap token on a smart-money signal | [`3qMg6maf…DTwjz`](https://solscan.io/tx/3qMg6maf6kpMZmT4eydyfTxMM1Mu9LnBS9ZkzgVLN689HfGu2G7cfNLx6nBVCYXrjXDnxxyW2yHgvFptW2nDTwjz) | 9 instructions: CU budget, wrap WSOL, 26-account PumpSwap swap, unwrap, tip |
 | Take-profit sell (+5% trigger, +0.00175 SOL realized) | [`3yCp6N82…bzaz`](https://solscan.io/tx/3yCp6N82jjdBa4CtRUErobLwFza93iwzrcMDSZFHFpRMayGMek7bUaCjJM6Cszuywjwv8jYUPbSk1khGRK8sbzaz) | Landed ~93 s after entry |
+| Second buy, 0.02 SOL | [`5trT8T3a…mSbt`](https://solscan.io/tx/5trT8T3at66Q2Ah5NEgSrDWxu85NfeJNjx6BHhav5j6EHUiokTGJQP3Ck9qVPxsYSLAwF3GiSSdGYae6fSmqmSbt) | — |
+| Stop-loss sell (-5% trigger, -0.00201 SOL realized) | [`6BWNCb3o…5nt`](https://solscan.io/tx/6BWNCb3oBdAFsiSYQWB4fbXrRCpoeMpsmkzQJTKmKgfCG3x7s1KFA2LRqJWXwKgMv1KZV5sEeMd7fbkJS5fc5nt) | Risk management working as designed |
 
 Every send is independently verifiable through Beam's own tracking endpoint
 (`GET https://api.solami.dev/swqos/tx/{signature}` → `is_landed: true`),
