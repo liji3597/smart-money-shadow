@@ -42,6 +42,8 @@
 - [x] Beam 实盘彩排:5 完整闭环上链(止盈+止损双向),净 +0.0144 SOL,落地延迟 ~8.7s(见 README「Proven on mainnet」)
 - [x] 持仓簿持久化(positions.json,重启后恢复未平仓)——实盘事故驱动修复
 - [x] 仪表盘钱包实时余额(Solami RPC 轮询,30s)
+- [x] `/account` 账户分析页(资金曲线、胜率、盈亏比、round-trip 表 + 每笔 K 线进出场标记;`/api/ohlcv` 服务端代理)
+- [x] dex 名称归一化修复(`pump.fun`/空 dex 信号曾全部误丢)+ 交易历史启动恢复(trades.jsonl → store)
 - [ ] 2-3 分钟主网 demo 视频
 - [ ] 提交 Superteam Earn(截止 2026-10-13 06:59 UTC)
 

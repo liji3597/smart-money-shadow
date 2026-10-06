@@ -70,7 +70,10 @@ Notes from building against the platform (documented for fellow builders):
   layouts), dry-run by default, daily budget cap, JSONL audit log.
 - `crates/api` — `shadow` binary: axum REST + WebSocket fanout, signal PnL
   tracker.
-- `web/` — Next.js dashboard.
+- `web/` — Next.js dashboard: the live trading desk at `/` (signals, token
+  board, positions) and a trading-journal account page at `/account` (equity
+  curve, win rate, profit factor, round trips with per-trade candle charts
+  marking entry/exit).
 
 ## Quick start
 
@@ -183,8 +186,9 @@ GET /api/performance            signal win rates (1h/24h), best/worst
 GET /api/tokens?limit=100       token board, most recently active first
 GET /api/tokens/{mint}
 GET /api/smart-money            tracked wallet set
-GET /api/trades?limit=50        dry-run / live trade records
+GET /api/trades?limit=50        dry-run / live trade records (restored from trades.jsonl on boot)
 GET /api/positions              open positions (live PnL) + recently closed
+GET /api/ohlcv?mint=&interval=&limit=  candle history (server-side Blur REST proxy, key never leaves the backend)
 WS  /ws                         snapshot on connect, then event/signal/trade/position frames
 ```
 
