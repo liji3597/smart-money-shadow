@@ -54,7 +54,7 @@ export default function TokenBoard({
             return (
               <div
                 key={t.mint}
-                className="flex items-center gap-2 px-3 py-1.5 font-mono text-[11px] tabular-nums hover:bg-panel-2"
+                className="flex items-center gap-2 px-3 py-1.5 font-mono text-[11px] tabular-nums transition-colors duration-150 hover:bg-panel-2"
               >
                 <button
                   onClick={() => onCopy(t.mint)}

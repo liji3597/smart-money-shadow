@@ -17,7 +17,8 @@ function Item({
       <span className="micro-label">{label}</span>
       <span className="flex items-baseline gap-1.5">
         <span
-          className={`font-mono text-[13px] font-medium tabular-nums ${valueCls ?? "text-ink"}`}
+          key={value}
+          className={`animate-value-flash font-mono text-[13px] font-medium tabular-nums ${valueCls ?? "text-ink"}`}
         >
           {value}
         </span>

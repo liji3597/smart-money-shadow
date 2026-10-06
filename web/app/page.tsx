@@ -394,7 +394,7 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen pb-10">
-      <header className="flex items-center justify-between border-b border-line bg-panel-2 px-4 py-3">
+      <header className="stagger flex items-center justify-between border-b border-line bg-panel-2 px-4 py-3">
         <div className="flex items-baseline gap-3">
           <h1 className="text-[15px] font-bold tracking-[-0.02em] text-ink">
             SMART-MONEY <span className="text-accent">SHADOW</span>
@@ -424,16 +424,18 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <StatusStrip metrics={metrics} perf={perf} />
+      <div className="stagger stagger-2">
+        <StatusStrip metrics={metrics} perf={perf} />
+      </div>
 
       <main className="mt-4 grid gap-4 px-4 lg:grid-cols-10">
-        <div className="order-1 lg:order-none lg:col-span-4">
+        <div className="stagger stagger-3 order-1 lg:order-none lg:col-span-4">
           <SignalFeed signals={signals} flashIds={flashIds} onCopy={copy} />
         </div>
-        <div className="order-3 lg:order-none lg:col-span-3">
+        <div className="stagger stagger-4 order-3 lg:order-none lg:col-span-3">
           <TokenBoard tokens={tokens} riskByMint={riskByMint} onCopy={copy} />
         </div>
-        <div className="order-2 flex flex-col gap-4 lg:order-none lg:col-span-3">
+        <div className="stagger stagger-5 order-2 flex flex-col gap-4 lg:order-none lg:col-span-3">
           <PositionsPanel
             open={positions.open}
             closed={positions.closed}

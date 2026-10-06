@@ -74,7 +74,11 @@ function SignalRow({
   const buyPct = total > 0 ? (signal.buy_volume_usd / total) * 100 : 50;
   const badge = triggerBadge(signal.trigger);
   return (
-    <article className={`px-3 py-3 ${flash ? "animate-flash" : ""}`}>
+    <article
+      className={`px-3 py-3 transition-colors duration-150 hover:bg-panel-2 ${
+        flash ? "animate-flash" : ""
+      }`}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <button

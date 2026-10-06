@@ -41,7 +41,7 @@ export default function PositionsPanel({
       <div className="panel max-h-[22rem] divide-y divide-line overflow-y-auto">
         {open.length === 0 && closed.length === 0 && (
           <div className="p-6 text-center font-mono text-xs text-ink-dim">
-            no positions yet…
+            no open positions — exits arm automatically after the next entry
           </div>
         )}
         {open.map((p) => {
