@@ -5,6 +5,7 @@
 *.db
 *.db-journal
 *.jsonl
+positions.json
 !package.json
 node_modules/
 web/.next/

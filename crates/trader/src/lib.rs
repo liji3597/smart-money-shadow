@@ -130,6 +130,10 @@ pub async fn run(
     wallet_balance: Arc<AtomicU64>,
     positions: Arc<PositionStore>,
 ) {
+    // Restore persisted open positions before the exit loop starts, so a
+    // restart resumes tracking (and live-selling) tokens already in the wallet.
+    positions.restore();
+
     // Beam authenticates over QUIC with a registered swQoS key, which is a
     // separate identity from the payer wallet. Falling back to the payer only
     // works if the payer itself is registered as a swQoS key.

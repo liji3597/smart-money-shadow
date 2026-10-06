@@ -102,7 +102,9 @@ async fn main() -> Result<()> {
 
     // trader
     let trade_store = Arc::new(TradeStore::default());
-    let position_store = Arc::new(shadow_trader::position::PositionStore::default());
+    let position_store = Arc::new(shadow_trader::position::PositionStore::with_path(
+        cfg.positions_path.clone(),
+    ));
     let beam_latency: Arc<AtomicU64> = engine.state.beam_latency_ms.clone();
     let wallet_balance: Arc<AtomicU64> = engine.state.wallet_balance_lamports.clone();
     tokio::spawn(shadow_trader::run(

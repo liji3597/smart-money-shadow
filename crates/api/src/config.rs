@@ -23,6 +23,9 @@ pub struct Config {
     pub swqos_keypair: Option<String>,
     pub beam_health_check: bool,
     pub trade_log_path: String,
+    /// Position book persistence — restored on startup so restarts don't
+    /// orphan tokens still in the wallet.
+    pub positions_path: String,
     pub slippage_bps: u64,
     pub priority_fee_microlamports: u64,
     pub dry_run_quote: bool,
@@ -71,6 +74,7 @@ impl Config {
                 .filter(|s| !s.trim().is_empty()),
             beam_health_check: env_bool("BEAM_HEALTH_CHECK", false),
             trade_log_path: env_or("TRADE_LOG_PATH", "trades.jsonl"),
+            positions_path: env_or("POSITIONS_PATH", "positions.json"),
             slippage_bps: env_u64("SLIPPAGE_BPS", 1500),
             priority_fee_microlamports: env_u64("PRIORITY_FEE_MICROLAMPORTS", 50_000),
             dry_run_quote: env_bool("DRY_RUN_QUOTE", true),
