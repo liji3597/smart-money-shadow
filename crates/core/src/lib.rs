@@ -369,7 +369,7 @@ pub struct WalletBuy {
     pub dex: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeRecord {
     pub signal_id: String,
     pub mint: String,

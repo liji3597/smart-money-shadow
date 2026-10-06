@@ -139,10 +139,21 @@ pub enum SwapPlan {
     Unsupported,
 }
 
-pub fn plan_for_dex(dex: &str) -> SwapPlan {
-    match dex {
+/// Map a venue name to an execution plan. Venue strings come from two
+/// sources with different spellings (Blur stream: "pump.fun"; gRPC tracker:
+/// "pumpswap"), so normalize case and strip separators before matching. An
+/// empty dex with a pump.fun-style mint (suffix "pump") is treated as a
+/// bonding curve — that suffix is only assigned to pump.fun mints.
+pub fn plan_for_dex(dex: &str, mint: &str) -> SwapPlan {
+    let norm: String = dex
+        .chars()
+        .filter(|c| !matches!(c, '.' | '_' | '-'))
+        .flat_map(char::to_lowercase)
+        .collect();
+    match norm.as_str() {
         "pumpfun" => SwapPlan::Pumpfun,
         "pumpswap" => SwapPlan::Pumpswap,
+        "" if mint.ends_with("pump") => SwapPlan::Pumpfun,
         _ => SwapPlan::Unsupported,
     }
 }
@@ -164,7 +175,7 @@ pub async fn build_buy_ixs(
     lamports_in: u64,
     slippage_bps: u64,
 ) -> Result<BuyQuote> {
-    match plan_for_dex(dex) {
+    match plan_for_dex(dex, &mint.to_string()) {
         SwapPlan::Pumpfun => pumpfun_buy(rpc, Some(payer), mint, lamports_in, slippage_bps).await,
         SwapPlan::Pumpswap => pumpswap_buy(rpc, Some(payer), mint, lamports_in, slippage_bps).await,
         SwapPlan::Unsupported => Err(unsupported(dex)),
@@ -179,7 +190,7 @@ pub async fn quote_buy(
     lamports_in: u64,
     slippage_bps: u64,
 ) -> Result<(u64, u64)> {
-    let quote = match plan_for_dex(dex) {
+    let quote = match plan_for_dex(dex, &mint.to_string()) {
         SwapPlan::Pumpfun => pumpfun_buy(rpc, None, mint, lamports_in, slippage_bps).await?,
         SwapPlan::Pumpswap => pumpswap_buy(rpc, None, mint, lamports_in, slippage_bps).await?,
         SwapPlan::Unsupported => return Err(unsupported(dex)),
@@ -845,7 +856,7 @@ pub async fn build_sell_ixs(
     dex: &str,
     slippage_bps: u64,
 ) -> Result<SellQuote> {
-    match plan_for_dex(dex) {
+    match plan_for_dex(dex, &mint.to_string()) {
         SwapPlan::Pumpfun => match pumpfun_sell(rpc, payer, mint, slippage_bps).await {
             Ok(q) => Ok(q),
             Err(e) if is_graduated(&e) => pumpswap_sell(rpc, payer, mint, slippage_bps).await,
@@ -1131,6 +1142,56 @@ mod tests {
     }
 
     const LEGACY_FEES: FeeBasisPoints = FeeBasisPoints { lp: 25, protocol: 5, coin_creator: 5 };
+
+    // ---- plan_for_dex --------------------------------------------------------
+
+    #[test]
+    fn plan_for_dex_accepts_observed_venue_spellings() {
+        // Values observed on the live Blur stream and the gRPC wallet tracker.
+        assert!(matches!(plan_for_dex("pumpfun", ""), SwapPlan::Pumpfun));
+        assert!(matches!(plan_for_dex("pump.fun", ""), SwapPlan::Pumpfun));
+        assert!(matches!(plan_for_dex("PUMP.FUN", ""), SwapPlan::Pumpfun));
+        assert!(matches!(plan_for_dex("pump_fun", ""), SwapPlan::Pumpfun));
+        assert!(matches!(plan_for_dex("pump-fun", ""), SwapPlan::Pumpfun));
+        assert!(matches!(plan_for_dex("pumpswap", ""), SwapPlan::Pumpswap));
+        assert!(matches!(plan_for_dex("pump.swap", ""), SwapPlan::Pumpswap));
+        assert!(matches!(plan_for_dex("PumpSwap", ""), SwapPlan::Pumpswap));
+    }
+
+    #[test]
+    fn plan_for_dex_rejects_venues_we_cannot_route() {
+        assert!(matches!(plan_for_dex("raydium", ""), SwapPlan::Unsupported));
+        assert!(matches!(plan_for_dex("raydium_clmm", ""), SwapPlan::Unsupported));
+        assert!(matches!(plan_for_dex("orca_whirlpool", ""), SwapPlan::Unsupported));
+        assert!(matches!(plan_for_dex("meteora_dlmm", ""), SwapPlan::Unsupported));
+        assert!(matches!(plan_for_dex("meteora", ""), SwapPlan::Unsupported));
+        assert!(matches!(plan_for_dex("manifest", ""), SwapPlan::Unsupported));
+        assert!(matches!(plan_for_dex("alphaq", ""), SwapPlan::Unsupported));
+    }
+
+    #[test]
+    fn plan_for_dex_empty_venue_falls_back_to_mint_suffix() {
+        // pump.fun mints end with the literal "pump" suffix.
+        assert!(matches!(
+            plan_for_dex("", "9Qmz39S4LvrtsBg9MuUPgdZKfXoYYcggZKjAsFQ7pump"),
+            SwapPlan::Pumpfun
+        ));
+        assert!(matches!(
+            plan_for_dex("", "So11111111111111111111111111111111111111112"),
+            SwapPlan::Unsupported
+        ));
+        assert!(matches!(plan_for_dex("", ""), SwapPlan::Unsupported));
+    }
+
+    #[test]
+    fn plan_for_dex_known_venue_name_beats_mint_suffix() {
+        // A pump-suffix mint on an unsupported venue stays unsupported: the
+        // explicit venue name is authoritative, the suffix is only a fallback.
+        assert!(matches!(
+            plan_for_dex("raydium", "9Qmz39S4LvrtsBg9MuUPgdZKfXoYYcggZKjAsFQ7pump"),
+            SwapPlan::Unsupported
+        ));
+    }
 
     // ---- compute_fee -------------------------------------------------------
 

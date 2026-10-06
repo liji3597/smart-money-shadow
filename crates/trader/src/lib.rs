@@ -94,6 +94,37 @@ impl TradeStore {
         let _ = self.tx.send(rec);
     }
 
+    /// Reload the JSONL trade log so a restart doesn't wipe /api/trades
+    /// history. Tolerates a missing file and corrupt lines. Bypasses
+    /// `record()` on purpose: replayed entries must not be re-broadcast.
+    /// Returns the number of records loaded (newest first, like `record()`).
+    pub fn load_from_jsonl(&self, path: &str) -> usize {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(r) => r,
+            Err(_) => return 0, // no log yet — fresh start
+        };
+        let mut records: Vec<TradeRecord> = Vec::new();
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<TradeRecord>(line) {
+                Ok(r) => records.push(r),
+                Err(e) => warn!(error = %e, "skipping corrupt trade log line"),
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        records.retain(|r| {
+            seen.insert(r.signature.clone().unwrap_or_else(|| format!("{}:{}", r.signal_id, r.at)))
+        });
+        records.sort_by_key(|r| std::cmp::Reverse(r.at));
+        records.truncate(MAX_TRADE_RECORDS);
+        let n = records.len();
+        *self.records.write().unwrap() = records.into_iter().map(Arc::new).collect();
+        n
+    }
+
     fn spend(&self, sol: f64) {
         let today = now_unix() / 86_400;
         let mut spent = self.spent.write().unwrap();
@@ -133,6 +164,14 @@ pub async fn run(
     // Restore persisted open positions before the exit loop starts, so a
     // restart resumes tracking (and live-selling) tokens already in the wallet.
     positions.restore();
+
+    // Same for trade history: the in-memory store starts empty, so without
+    // this /api/trades would go blank on every restart even though
+    // trades.jsonl has the full history.
+    let restored = store.load_from_jsonl(&cfg.log_path);
+    if restored > 0 {
+        info!(restored, path = %cfg.log_path, "trade history restored from log");
+    }
 
     // Beam authenticates over QUIC with a registered swQoS key, which is a
     // separate identity from the payer wallet. Falling back to the payer only
@@ -300,7 +339,7 @@ pub async fn run(
             continue;
         }
 
-        let plan = swap::plan_for_dex(&sig.dex);
+        let plan = swap::plan_for_dex(&sig.dex, &sig.mint);
 
         if let Some(exec) = &live {
             match plan {
@@ -787,4 +826,85 @@ async fn beam_health_check(
     );
     let vtx = solami::VersionedTransaction::from(tx);
     beam_send_and_confirm(&client, &vtx).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_log(tag: &str) -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "shadow-trades-test-{tag}-{}.jsonl",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn trade(signal_id: &str, mode: &str, at: i64) -> TradeRecord {
+        TradeRecord {
+            signal_id: signal_id.into(),
+            mint: "9Qmz39S4LvrtsBg9MuUPgdZKfXoYYcggZKjAsFQ7pump".into(),
+            mode: mode.into(),
+            sol_amount: 0.05,
+            signature: None,
+            landed_ms: None,
+            error: None,
+            realized_pnl_sol: None,
+            reason: None,
+            at,
+        }
+    }
+
+    #[test]
+    fn load_from_jsonl_restores_history_newest_first() {
+        let path = temp_log("restore");
+        let older = trade("sig-1", "dry_run", 1_000);
+        let newer = trade("sig-2", "live", 2_000);
+        let mut contents = serde_json::to_string(&older).unwrap();
+        contents.push('\n');
+        contents.push_str("this is not json");
+        contents.push('\n');
+        contents.push_str(&serde_json::to_string(&newer).unwrap());
+        contents.push('\n');
+        std::fs::write(&path, contents).unwrap();
+
+        let store = TradeStore::default();
+        assert_eq!(store.load_from_jsonl(&path), 2);
+
+        let records = store.records.read().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].signal_id, "sig-2"); // newest first
+        assert_eq!(records[0].mode, "live");
+        assert_eq!(records[1].signal_id, "sig-1");
+        assert_eq!(records[1].mode, "dry_run");
+        drop(records);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_from_jsonl_missing_file_is_empty() {
+        let store = TradeStore::default();
+        assert_eq!(store.load_from_jsonl("definitely-not-here.jsonl"), 0);
+        assert!(store.records.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn load_from_jsonl_dedupes_by_signature() {
+        let path = temp_log("dedupe");
+        let mut signed = trade("sig-1", "live", 1_000);
+        signed.signature = Some("5abc".into());
+        let contents = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&signed).unwrap(),
+            serde_json::to_string(&signed).unwrap()
+        );
+        std::fs::write(&path, contents).unwrap();
+
+        let store = TradeStore::default();
+        assert_eq!(store.load_from_jsonl(&path), 1);
+        assert_eq!(store.records.read().unwrap().len(), 1);
+        std::fs::remove_file(&path).ok();
+    }
 }
