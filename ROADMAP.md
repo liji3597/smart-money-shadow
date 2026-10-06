@@ -37,9 +37,11 @@
 
 - [x] 公开仓库 + MIT License:https://github.com/liji3597/smart-money-shadow
 - [x] GitHub Actions CI(cargo check/test/clippy + pnpm build)
-- [x] 47 个单元测试(报价数学、事件解析、买入判定、过滤器)
+- [x] 49 个单元测试(报价数学、事件解析、买入判定、过滤器)
 - [x] 前端性能修复(WS 事件批处理,渲染从 ~80 次/秒降到 1 Hz)
-- [ ] Beam 实盘彩排(burner 钱包小额实测 + 落地延迟)
+- [x] Beam 实盘彩排:5 完整闭环上链(止盈+止损双向),净 +0.0144 SOL,落地延迟 ~8.7s(见 README「Proven on mainnet」)
+- [x] 持仓簿持久化(positions.json,重启后恢复未平仓)——实盘事故驱动修复
+- [x] 仪表盘钱包实时余额(Solami RPC 轮询,30s)
 - [ ] 2-3 分钟主网 demo 视频
 - [ ] 提交 Superteam Earn(截止 2026-10-13 06:59 UTC)
 
