@@ -394,29 +394,29 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen pb-10">
-      <header className="flex items-center justify-between border-b border-white/10 px-4 py-3">
-        <div className="flex items-center gap-3">
-          <h1 className="font-mono text-sm font-bold tracking-widest text-zinc-100">
-            SMART-MONEY <span className="text-cyan-400">SHADOW</span>
+      <header className="flex items-center justify-between border-b border-line bg-panel-2 px-4 py-3">
+        <div className="flex items-baseline gap-3">
+          <h1 className="text-[15px] font-bold tracking-[-0.02em] text-ink">
+            SMART-MONEY <span className="text-accent">SHADOW</span>
           </h1>
-          <span className="hidden font-mono text-[10px] text-zinc-600 sm:inline">
+          <span className="micro-label hidden sm:inline">
             solana smart money tracker
           </span>
         </div>
         <div className="flex items-center gap-3 font-mono text-[11px]">
-          <span className="text-zinc-600" suppressHydrationWarning>
+          <span className="tabular-nums text-ink-dim" suppressHydrationWarning>
             {new Date(clock).toLocaleTimeString("en-GB")}
           </span>
           <span
-            className={`flex items-center gap-1.5 rounded border px-2 py-0.5 ${
+            className={`badge gap-1.5 ${
               wsConnected
-                ? "border-green-500/40 bg-green-500/10 text-green-400"
-                : "border-red-500/40 bg-red-500/10 text-red-400"
+                ? "border-buy/40 text-buy"
+                : "border-sell/40 text-sell"
             }`}
           >
             <span
               className={`inline-block h-1.5 w-1.5 rounded-full ${
-                wsConnected ? "bg-green-400" : "bg-red-500"
+                wsConnected ? "bg-buy animate-live" : "bg-sell"
               }`}
             />
             WS {wsConnected ? "CONNECTED" : "RECONNECTING"}
@@ -448,7 +448,7 @@ export default function Dashboard() {
       {toast && (
         <div
           key={toast.id}
-          className="fixed bottom-12 right-4 z-30 rounded border border-cyan-500/40 bg-[#0b1118] px-3 py-2 font-mono text-xs text-cyan-300 shadow-lg"
+          className="fixed bottom-12 right-4 z-30 rounded-[10px] border border-accent/40 bg-panel-2 px-3 py-2 font-mono text-xs text-accent"
         >
           {toast.msg}
         </div>
