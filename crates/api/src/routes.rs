@@ -47,6 +47,7 @@ pub async fn serve(
     positions: Arc<PositionStore>,
     event_tx: tokio::sync::broadcast::Sender<Arc<shadow_core::DexEvent>>,
     pnl: PnlTracker,
+    rest: shadow_ingest::BlurRest,
 ) -> Result<()> {
     let state = Arc::new(AppState {
         engine,
@@ -56,6 +57,7 @@ pub async fn serve(
         positions,
         event_tx,
         pnl,
+        rest,
     });
     let app = Router::new()
         .route("/api/health", get(api_health))
@@ -67,6 +69,7 @@ pub async fn serve(
         .route("/api/smart-money", get(api_smart_money))
         .route("/api/trades", get(api_trades))
         .route("/api/positions", get(api_positions))
+        .route("/api/ohlcv", get(api_ohlcv))
         .route("/ws", get(ws_handler))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -181,6 +184,38 @@ async fn api_trades(State(st): State<Arc<AppState>>, Query(q): Query<Limit>) -> 
 
 async fn api_positions(State(st): State<Arc<AppState>>) -> Json<Value> {
     Json(positions_json(&st.positions))
+}
+
+#[derive(Deserialize)]
+struct OhlcvQuery {
+    mint: String,
+    interval: Option<String>,
+    limit: Option<usize>,
+}
+
+/// Server-side proxy to Blur REST OHLCV — the browser never sees the API key.
+/// Forwards the response JSON verbatim; upstream failures surface as 502.
+async fn api_ohlcv(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<OhlcvQuery>,
+) -> impl IntoResponse {
+    let interval = q.interval.unwrap_or_else(|| "1m".to_owned());
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000).to_string();
+    match st
+        .rest
+        .raw_get(
+            "/token/ohlcv",
+            &[("address", q.mint), ("interval", interval), ("limit", limit)],
+        )
+        .await
+    {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("{e:#}") })),
+        )
+            .into_response(),
+    }
 }
 
 fn positions_json(positions: &PositionStore) -> Value {

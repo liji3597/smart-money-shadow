@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchMetrics,
@@ -404,6 +405,12 @@ export default function Dashboard() {
           </span>
         </div>
         <div className="flex items-center gap-3 font-mono text-[11px]">
+          <Link
+            href="/account"
+            className="micro-label transition-colors duration-150 hover:text-accent"
+          >
+            ACCOUNT →
+          </Link>
           <span className="tabular-nums text-ink-dim" suppressHydrationWarning>
             {new Date(clock).toLocaleTimeString("en-GB")}
           </span>

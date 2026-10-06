@@ -182,6 +182,12 @@ impl BlurRest {
         serde_json::from_str(&body).with_context(|| format!("blur rest {path}: bad json"))
     }
 
+    /// Raw passthrough for endpoints we don't model yet (e.g. OHLCV candles
+    /// for the account page). Same auth and error shape as `get`.
+    pub async fn raw_get(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
+        self.get(path, query).await
+    }
+
     /// Wallets from the Blur PnL trader leaderboard.
     pub async fn top_trader_wallets(&self, limit: usize) -> Result<Vec<String>> {
         let v = self

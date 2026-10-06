@@ -143,6 +143,7 @@ async fn main() -> Result<()> {
         position_store,
         event_tx,
         pnl,
+        rest,
     )
     .await
 }
@@ -156,6 +157,7 @@ pub struct AppState {
     pub positions: Arc<shadow_trader::position::PositionStore>,
     pub event_tx: broadcast::Sender<Arc<DexEvent>>,
     pub pnl: pnl::PnlTracker,
+    pub rest: BlurRest,
 }
 
 impl AppState {

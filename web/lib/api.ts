@@ -1,6 +1,7 @@
 import type {
   Health,
   Metrics,
+  OhlcvBar,
   PerformanceStats,
   Positions,
   Signal,
@@ -57,4 +58,14 @@ export async function fetchHealth(): Promise<Health> {
 export async function fetchPerformance(): Promise<PerformanceStats> {
   const data = await get<{ performance: PerformanceStats }>("/api/performance");
   return data.performance;
+}
+
+export async function fetchOhlcv(
+  mint: string,
+  interval = "1m",
+  limit = 200,
+): Promise<OhlcvBar[]> {
+  return get<OhlcvBar[]>(
+    `/api/ohlcv?mint=${encodeURIComponent(mint)}&interval=${interval}&limit=${limit}`,
+  );
 }

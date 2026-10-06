@@ -172,3 +172,14 @@ export interface Health {
   stream_connected: boolean;
   uptime_secs: number;
 }
+
+/** One OHLCV candle from /api/ohlcv (proxied Blur REST; prices are decimal strings). */
+export interface OhlcvBar {
+  time: number; // unix seconds
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  volume: string;
+  trades: number;
+}
