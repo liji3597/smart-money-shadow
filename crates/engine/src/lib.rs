@@ -80,6 +80,8 @@ pub struct EngineState {
     pub signal_tx: broadcast::Sender<Arc<Signal>>,
     /// Last Beam landing latency in ms (0 = never measured). Owned by the trader.
     pub beam_latency_ms: Arc<AtomicU64>,
+    /// Trader wallet balance in lamports (0 = never polled). Owned by the trader.
+    pub wallet_balance_lamports: Arc<AtomicU64>,
 }
 
 pub struct Engine {
@@ -121,6 +123,7 @@ impl Engine {
             last_signal_at: DashMap::new(),
             signal_tx,
             beam_latency_ms: Arc::new(AtomicU64::new(0)),
+            wallet_balance_lamports: Arc::new(AtomicU64::new(0)),
         });
         Ok(Arc::new(Engine {
             state,

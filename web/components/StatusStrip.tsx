@@ -102,6 +102,24 @@ export default function StatusStrip({
           valueCls="text-accent"
         />
       )}
+      <Item
+        label="Wallet"
+        value={
+          metrics?.wallet_balance_sol != null && metrics.wallet_balance_sol > 0
+            ? metrics.wallet_balance_sol.toFixed(4)
+            : "—"
+        }
+        valueCls={
+          metrics?.wallet_balance_sol != null && metrics.wallet_balance_sol > 0
+            ? undefined
+            : "text-ink-dim"
+        }
+        sub={
+          metrics?.wallet_balance_sol != null && metrics.wallet_balance_sol > 0
+            ? "SOL"
+            : undefined
+        }
+      />
     </div>
   );
 }

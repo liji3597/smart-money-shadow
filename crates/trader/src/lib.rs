@@ -127,6 +127,7 @@ pub async fn run(
     mut rx: broadcast::Receiver<Arc<Signal>>,
     store: Arc<TradeStore>,
     beam_latency_ms: Arc<AtomicU64>,
+    wallet_balance: Arc<AtomicU64>,
     positions: Arc<PositionStore>,
 ) {
     // Beam authenticates over QUIC with a registered swQoS key, which is a
@@ -158,6 +159,38 @@ pub async fn run(
             }
             _ => warn!("BEAM_HEALTH_CHECK set but SOLAMI_TRADER_KEYPAIR missing"),
         }
+    }
+
+    // Wallet balance poller: whenever a payer keypair is configured (live or
+    // dry-run), report its SOL balance to the dashboard every 30s.
+    if let Some(kp) = cfg.keypair_b58.clone() {
+        let api_key = cfg.api_key.clone();
+        tokio::spawn(async move {
+            let client: ReadClient = match solami::builder().with_rpc(&api_key).build().await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, "wallet balance client init failed");
+                    return;
+                }
+            };
+            let payer = solami::Keypair::from_base58_string(&kp).pubkey();
+            let mut warned = false;
+            loop {
+                match client.get_balance(&payer).await {
+                    Ok(lamports) => {
+                        wallet_balance.store(lamports, Ordering::Relaxed);
+                        warned = false;
+                    }
+                    Err(e) => {
+                        if !warned {
+                            warn!(error = %e, "wallet balance poll failed");
+                            warned = true;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
     }
 
     let live: Option<Arc<LiveExecutor>> = if cfg.live {

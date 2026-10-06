@@ -16,6 +16,7 @@ export interface Metrics {
   last_event_slot: number;
   beam_last_latency_ms: number | null;
   signals_filtered_total?: number;
+  wallet_balance_sol?: number | null;
 }
 
 export interface Signal {

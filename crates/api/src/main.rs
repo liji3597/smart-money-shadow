@@ -104,6 +104,7 @@ async fn main() -> Result<()> {
     let trade_store = Arc::new(TradeStore::default());
     let position_store = Arc::new(shadow_trader::position::PositionStore::default());
     let beam_latency: Arc<AtomicU64> = engine.state.beam_latency_ms.clone();
+    let wallet_balance: Arc<AtomicU64> = engine.state.wallet_balance_lamports.clone();
     tokio::spawn(shadow_trader::run(
         TraderConfig {
             live: cfg.live_trading,
@@ -126,6 +127,7 @@ async fn main() -> Result<()> {
         engine.state.signal_tx.subscribe(),
         trade_store.clone(),
         beam_latency,
+        wallet_balance,
         position_store.clone(),
     ));
 
@@ -167,6 +169,8 @@ impl AppState {
         m.grpc_track_reconnects = self.track_health.reconnects.load(Ordering::Relaxed);
         let latency = st.beam_latency_ms.load(Ordering::Relaxed);
         m.beam_last_latency_ms = (latency > 0).then_some(latency);
+        m.wallet_balance_sol =
+            st.wallet_balance_lamports.load(Ordering::Relaxed) as f64 / 1e9;
         m.trades_total = self.trades.records.read().unwrap().len() as u64;
         let now = shadow_core::now_unix();
         let times = st.recent_event_times.read().unwrap();

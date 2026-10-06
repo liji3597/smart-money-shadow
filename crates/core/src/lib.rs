@@ -413,6 +413,8 @@ pub struct Metrics {
     pub grpc_track_reconnects: u64,
     /// Signals dropped by the volume / size filters before emission.
     pub signals_filtered_total: u64,
+    /// Trader wallet balance in SOL (0 = not polled yet / no keypair set).
+    pub wallet_balance_sol: f64,
 }
 
 /// One row of the token board.
