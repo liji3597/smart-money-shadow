@@ -168,10 +168,27 @@ Raw firehose in, judgement out. On a typical mainnet hour the engine sees
 (`signals_filtered_total` in the metrics), and surfaces the rest. Filters:
 
 - window buy volume below `MIN_SIGNAL_VOLUME_USD` → dropped
-- gRPC-path buys below `MIN_SMART_BUY_SOL` → dropped
+- window buy volume above `MAX_SIGNAL_VOLUME_USD` → dropped (a token that hot
+  is already late-stage)
+- Blur-path buys below `MIN_SMART_BUY_USD` / above `MAX_SMART_BUY_USD` →
+  dropped; gRPC-path buys below `MIN_SMART_BUY_SOL` / above
+  `MAX_SMART_BUY_SOL` → dropped (a single oversized buy means the trade is
+  already crowded)
 - quote currencies and blue chips (WSOL, USDC, USDT, USDS, cbBTC, WBTC, WETH)
   never signal — a smart wallet "buying" USDC is an exit leg, not alpha
 - one signal per token per `SIGNAL_COOLDOWN_SECS`
+- wallet profiler: every tracked wallet's gRPC buys and sells are paired into
+  round trips (persisted to `wallet_profiles.json`, restored on restart).
+  Wallets with ≥ `MIN_WALLET_ROUND_TRIPS` samples and a win rate below
+  `MIN_WALLET_WIN_RATE` are blocked; ≥ 60% win rate earns a 1.5x size boost.
+  Under-sampled wallets pass at 1x while their sample builds up
+  (`FOLLOW_UNKNOWN_WALLETS=false` blocks them instead). Median hold time
+  classifies wallets as scalper (<30 min) or swing, shown as SC/SW badges.
+
+Position size scales with conviction: the trader multiplies
+`TRADE_SOL_PER_SIGNAL` by 1.25x when the triggering buy was ≥2 SOL/$2,000 and
+1.5x when ≥5 SOL/$5,000, times the wallet-profiler boost, capped at 2.5x —
+`MAX_DAILY_SOL` remains the hard ceiling.
 
 Every signal is then tracked: 1h/24h PnL is backfilled from Data REST prices
 and aggregated into win rates at `/api/performance`.

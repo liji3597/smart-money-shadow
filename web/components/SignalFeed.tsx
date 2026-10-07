@@ -61,6 +61,17 @@ function triggerBadge(trigger: string): { label: string; cls: string } {
   }
 }
 
+function styleBadge(style: string): { label: string; cls: string } {
+  switch (style) {
+    case "scalper":
+      return { label: "SC", cls: "border-warn/40 text-warn" };
+    case "swing":
+      return { label: "SW", cls: "border-accent/40 text-accent" };
+    default:
+      return { label: style.slice(0, 2).toUpperCase(), cls: "border-line-strong text-ink-dim" };
+  }
+}
+
 function SignalRow({
   signal,
   flash,
@@ -101,7 +112,17 @@ function SignalRow({
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1.5">
-          <span className={`badge ${badge.cls}`}>{badge.label}</span>
+          <span className="flex items-center gap-1">
+            {signal.wallet_style && (
+              <span
+                className={`badge ${styleBadge(signal.wallet_style).cls}`}
+                title={`wallet style: ${signal.wallet_style}`}
+              >
+                {styleBadge(signal.wallet_style).label}
+              </span>
+            )}
+            <span className={`badge ${badge.cls}`}>{badge.label}</span>
+          </span>
           <span className="micro-label font-mono tabular-nums">
             {timeAgo(signal.created_at)}
           </span>

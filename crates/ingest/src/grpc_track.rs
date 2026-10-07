@@ -1,7 +1,8 @@
 //! Native Yellowstone gRPC wallet tracking: subscribes to on-chain
-//! transactions involving the smart-money set and derives `WalletBuy` events
-//! from pre/post token-balance deltas. Complements the Blur stream, which
-//! only decodes a subset of DEXes.
+//! transactions involving the smart-money set and derives `WalletTrade`
+//! events (buys and sells) from pre/post token-balance deltas. Complements
+//! the Blur stream, which only decodes a subset of DEXes. Sells feed the
+//! engine's wallet profiler (round-trip stats).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
@@ -13,7 +14,7 @@ use futures::StreamExt;
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, info, warn};
 
-use shadow_core::WalletBuy;
+use shadow_core::WalletTrade;
 
 use crate::StreamHealth;
 
@@ -40,12 +41,12 @@ const DEX_PROGRAMS: &[(&str, &str)] = &[
 ];
 
 /// Run the wallet-track loop forever, reconnecting with capped exponential
-/// backoff. Buys are fanned out on `event_tx`; the subscribed wallet set
+/// backoff. Trades are fanned out on `event_tx`; the subscribed wallet set
 /// follows `wallet_rx`.
 pub async fn run_wallet_track(
     api_key: String,
     wallet_rx: watch::Receiver<Arc<HashSet<String>>>,
-    event_tx: broadcast::Sender<Arc<WalletBuy>>,
+    event_tx: broadcast::Sender<Arc<WalletTrade>>,
     health: StreamHealth,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -75,7 +76,7 @@ pub async fn run_wallet_track(
 async fn track_once(
     api_key: &str,
     wallet_rx: &watch::Receiver<Arc<HashSet<String>>>,
-    event_tx: &broadcast::Sender<Arc<WalletBuy>>,
+    event_tx: &broadcast::Sender<Arc<WalletTrade>>,
     health: &StreamHealth,
 ) -> Result<()> {
     let mut rx = wallet_rx.clone();
@@ -108,8 +109,8 @@ async fn track_once(
                     continue;
                 };
                 health.last_slot.store(tx.slot, Ordering::Relaxed);
-                for buy in parse_wallet_buys(&tx, &current) {
-                    let _ = event_tx.send(Arc::new(buy));
+                for trade in parse_wallet_trades(&tx, &current) {
+                    let _ = event_tx.send(Arc::new(trade));
                 }
             }
             changed = rx.changed() => {
@@ -157,11 +158,13 @@ fn filter_request(accounts: Vec<String>) -> solami::SubscribeRequest {
 }
 
 /// A smart wallet "bought" a mint when its token balance for that mint net
-/// increases while its quote side (SOL, WSOL, USDC or USDT) net decreases.
-fn parse_wallet_buys(
+/// increases while its quote side (SOL, WSOL, USDC or USDT) net decreases;
+/// a "sell" is the mirror image. Both are emitted — buys drive signals, sells
+/// feed the wallet profiler's round-trip stats.
+fn parse_wallet_trades(
     update: &solami::geyser::SubscribeUpdateTransaction,
     smart: &HashSet<String>,
-) -> Vec<WalletBuy> {
+) -> Vec<WalletTrade> {
     let Some(info) = &update.transaction else {
         return Vec::new();
     };
@@ -218,36 +221,54 @@ fn parse_wallet_buys(
             .or_default() += delta;
     }
 
-    let mut buys = Vec::new();
+    let mut trades = Vec::new();
     for (wallet, deltas) in by_wallet {
         let sol_delta = sol_delta(&keys, meta, wallet);
         let quote_spent = [WSOL, USDC, USDT]
             .iter()
             .any(|q| deltas.get(q).is_some_and(|d| *d < 0));
-        if !quote_spent && sol_delta >= 0 {
-            continue;
-        }
+        let quote_gained = [WSOL, USDC, USDT]
+            .iter()
+            .any(|q| deltas.get(q).is_some_and(|d| *d > 0));
         let wsol_spent = deltas
             .get(WSOL)
             .filter(|d| **d < 0)
             .map(|d| (-*d) as f64 / 1e9)
             .unwrap_or(0.0);
+        let wsol_gained = deltas
+            .get(WSOL)
+            .filter(|d| **d > 0)
+            .map(|d| *d as f64 / 1e9)
+            .unwrap_or(0.0);
         let sol_spent = (-sol_delta.min(0)) as f64 / 1e9 + wsol_spent;
+        let sol_received = (sol_delta.max(0)) as f64 / 1e9 + wsol_gained;
         for (mint, delta) in deltas {
-            if delta <= 0 || mint == WSOL || mint == USDC || mint == USDT {
+            if delta == 0 || mint == WSOL || mint == USDC || mint == USDT {
                 continue;
             }
-            buys.push(WalletBuy {
+            let (side, sol_amount) = if delta > 0 {
+                if !quote_spent && sol_delta >= 0 {
+                    continue; // tokens arrived but nothing left — airdrop
+                }
+                ("buy", sol_spent)
+            } else {
+                if !quote_gained && sol_delta <= 0 {
+                    continue; // tokens left but nothing came back — transfer out
+                }
+                ("sell", sol_received)
+            };
+            trades.push(WalletTrade {
                 wallet: wallet.to_owned(),
                 mint: mint.to_owned(),
-                sol_spent,
+                side: side.to_owned(),
+                sol_amount,
                 slot: update.slot,
                 signature: signature.clone(),
                 dex: dex.clone(),
             });
         }
     }
-    buys
+    trades
 }
 
 fn raw_amount(b: &solami::solana::storage::confirmed_block::TokenBalance) -> u128 {
@@ -366,12 +387,13 @@ mod tests {
             1_000_000_000,
             900_000_000,
         );
-        let buys = parse_wallet_buys(&tx, &smart_set());
+        let buys = parse_wallet_trades(&tx, &smart_set());
         assert_eq!(buys.len(), 1);
         let buy = &buys[0];
         assert_eq!(buy.wallet, WALLET);
         assert_eq!(buy.mint, MINT);
-        assert!((buy.sol_spent - 0.1).abs() < 1e-9, "sol_spent = {}", buy.sol_spent);
+        assert_eq!(buy.side, "buy");
+        assert!((buy.sol_amount - 0.1).abs() < 1e-9, "sol_amount = {}", buy.sol_amount);
         assert_eq!(buy.slot, 42);
         assert_eq!(buy.dex, "pumpswap");
         assert_eq!(buy.signature, bs58::encode([7u8; 64]).into_string());
@@ -389,9 +411,10 @@ mod tests {
             1_000_000_000,
             1_000_000_000,
         );
-        let buys = parse_wallet_buys(&tx, &smart_set());
+        let buys = parse_wallet_trades(&tx, &smart_set());
         assert_eq!(buys.len(), 1);
-        assert!((buys[0].sol_spent - 0.5).abs() < 1e-9, "sol_spent = {}", buys[0].sol_spent);
+        assert_eq!(buys[0].side, "buy");
+        assert!((buys[0].sol_amount - 0.5).abs() < 1e-9, "sol_amount = {}", buys[0].sol_amount);
     }
 
     #[test]
@@ -403,18 +426,38 @@ mod tests {
             1_000_000_000,
             1_000_000_000,
         );
-        assert!(parse_wallet_buys(&tx, &smart_set()).is_empty());
+        assert!(parse_wallet_trades(&tx, &smart_set()).is_empty());
     }
 
     #[test]
-    fn sell_is_not_a_buy() {
+    fn sell_detected_when_tokens_decrease_and_sol_increases() {
         let tx = update(
             vec![token_balance(3, MINT, WALLET, 1_000)],
             vec![token_balance(3, MINT, WALLET, 0)],
             1_000_000_000,
             1_100_000_000,
         );
-        assert!(parse_wallet_buys(&tx, &smart_set()).is_empty());
+        let trades = parse_wallet_trades(&tx, &smart_set());
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].side, "sell");
+        assert_eq!(trades[0].mint, MINT);
+        assert!(
+            (trades[0].sol_amount - 0.1).abs() < 1e-9,
+            "sol_amount = {}",
+            trades[0].sol_amount
+        );
+    }
+
+    #[test]
+    fn transfer_out_is_not_a_sell() {
+        // Tokens leave but no SOL/quote comes back — a plain transfer.
+        let tx = update(
+            vec![token_balance(3, MINT, WALLET, 1_000)],
+            vec![token_balance(3, MINT, WALLET, 0)],
+            1_000_000_000,
+            1_000_000_000,
+        );
+        assert!(parse_wallet_trades(&tx, &smart_set()).is_empty());
     }
 
     #[test]
@@ -425,17 +468,17 @@ mod tests {
             1_000_000_000,
             900_000_000,
         );
-        assert!(parse_wallet_buys(&tx, &smart_set()).is_empty());
+        assert!(parse_wallet_trades(&tx, &smart_set()).is_empty());
     }
 
     #[test]
     fn missing_meta_or_transaction_yields_no_buys() {
         let mut tx = update(vec![], vec![token_balance(3, MINT, WALLET, 1_000)], 1_000_000_000, 0);
         tx.transaction.as_mut().unwrap().meta = None;
-        assert!(parse_wallet_buys(&tx, &smart_set()).is_empty());
+        assert!(parse_wallet_trades(&tx, &smart_set()).is_empty());
 
         let empty = SubscribeUpdateTransaction { transaction: None, slot: 1 };
-        assert!(parse_wallet_buys(&empty, &smart_set()).is_empty());
+        assert!(parse_wallet_trades(&empty, &smart_set()).is_empty());
     }
 
     #[test]

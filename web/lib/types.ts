@@ -36,6 +36,13 @@ export interface Signal {
   risk_score: number; // 0 = clean, 100 = likely rug
   risk_factors: string[];
   top10_holder_pct?: number;
+  // size of the triggering smart-money buy (0 when unknown)
+  smart_buy_sol?: number;
+  smart_buy_usd?: number;
+  // profiler classification of the triggering wallet
+  wallet_style?: "scalper" | "swing";
+  // engine-side wallet-quality multiplier (1.0 neutral, 1.5 proven winner)
+  wallet_multiplier?: number;
   created_at: number; // unix seconds
   // merged in by the API from the PnL tracker (present once backfilled)
   current_price_usd?: number;

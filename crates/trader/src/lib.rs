@@ -148,6 +148,21 @@ type ReadClient = solami::Solami<solami::On<solami::RpcKit>, solami::Off, solami
 /// mint -> (fetched_at, quote result); failures are cached too.
 type QuoteCache = HashMap<String, (i64, Result<(u64, u64), String>)>;
 
+/// Position-size multiplier: bigger smart-money conviction gets a bigger
+/// position (≥5 SOL or ≥$5000 → 1.5x, ≥2 SOL or ≥$2000 → 1.25x), times the
+/// engine's wallet-quality multiplier (1.5x for proven winners), capped at
+/// 2.5x total. The result still respects the MAX_DAILY_SOL hard cap.
+fn size_multiplier(sig: &Signal) -> f64 {
+    let size_tier = if sig.smart_buy_sol >= 5.0 || sig.smart_buy_usd >= 5_000.0 {
+        1.5
+    } else if sig.smart_buy_sol >= 2.0 || sig.smart_buy_usd >= 2_000.0 {
+        1.25
+    } else {
+        1.0
+    };
+    (size_tier * sig.wallet_multiplier).min(2.5)
+}
+
 struct LiveExecutor {
     client: LiveClient,
     keypair: solami::Keypair,
@@ -299,8 +314,9 @@ pub async fn run(
             Err(broadcast::error::RecvError::Closed) => break,
         };
 
+        let trade_sol = cfg.sol_per_trade * size_multiplier(&sig);
         let remaining = store.remaining_today(cfg.max_daily_sol);
-        if cfg.sol_per_trade > remaining {
+        if trade_sol > remaining {
             warn!(
                 mint = %sig.mint,
                 remaining_sol = remaining,
@@ -359,13 +375,13 @@ pub async fn run(
                     });
                 }
                 _ => {
-                    store.spend(cfg.sol_per_trade);
-                    match execute_live(exec, &sig, &cfg).await {
+                    store.spend(trade_sol);
+                    match execute_live(exec, &sig, trade_sol, &cfg).await {
                         Ok((signature, ms, expected_tokens)) => {
                             info!(
                                 mint = %sig.mint,
                                 dex = %sig.dex,
-                                sol = cfg.sol_per_trade,
+                                sol = trade_sol,
                                 %signature,
                                 landed_ms = ms,
                                 "live: buy landed"
@@ -381,7 +397,7 @@ pub async fn run(
                                 symbol: sig.symbol.clone(),
                                 dex: sig.dex.clone(),
                                 entry_price_usd: sig.price_usd,
-                                sol_in: cfg.sol_per_trade,
+                                sol_in: trade_sol,
                                 tokens,
                                 opened_at: now_unix(),
                                 last_price_usd: None,
@@ -393,7 +409,7 @@ pub async fn run(
                                 signal_id: sig.id.clone(),
                                 mint: sig.mint.clone(),
                                 mode: "live".into(),
-                                sol_amount: cfg.sol_per_trade,
+                                sol_amount: trade_sol,
                                 signature: Some(signature.to_string()),
                                 landed_ms: Some(ms),
                                 error: None,
@@ -410,7 +426,7 @@ pub async fn run(
                                 signal_id: sig.id.clone(),
                                 mint: sig.mint.clone(),
                                 mode: "live_error".into(),
-                                sol_amount: cfg.sol_per_trade,
+                                sol_amount: trade_sol,
                                 signature: None,
                                 landed_ms: None,
                                 error: Some(format!("{e:#}")),
@@ -427,12 +443,13 @@ pub async fn run(
             continue;
         }
 
-        store.spend(cfg.sol_per_trade);
+        store.spend(trade_sol);
 
         let quote = if cfg.dry_run_quote && !matches!(plan, swap::SwapPlan::Unsupported) {
             dry_run_quote(
                 quote_client.as_ref().map(|c| &**c as _),
                 &sig,
+                trade_sol,
                 &cfg,
                 &mut quote_cache,
             )
@@ -446,7 +463,7 @@ pub async fn run(
                 mint = %sig.mint,
                 symbol = ?sig.symbol,
                 dex = %sig.dex,
-                lamports_in = (cfg.sol_per_trade * LAMPORTS_PER_SOL as f64) as u64,
+                lamports_in = (trade_sol * LAMPORTS_PER_SOL as f64) as u64,
                 expected_tokens = expected,
                 min_tokens_out = min_out,
                 price_usd = sig.price_usd,
@@ -456,7 +473,7 @@ pub async fn run(
                 mint = %sig.mint,
                 symbol = ?sig.symbol,
                 price_usd = sig.price_usd,
-                sol = cfg.sol_per_trade,
+                sol = trade_sol,
                 quote_error = %e,
                 "dry-run: would buy (quote unavailable)"
             ),
@@ -464,7 +481,7 @@ pub async fn run(
                 mint = %sig.mint,
                 symbol = ?sig.symbol,
                 price_usd = sig.price_usd,
-                sol = cfg.sol_per_trade,
+                sol = trade_sol,
                 risk = sig.risk_score,
                 trigger = %sig.trigger,
                 "dry-run: would buy"
@@ -478,7 +495,7 @@ pub async fn run(
             symbol: sig.symbol.clone(),
             dex: sig.dex.clone(),
             entry_price_usd: sig.price_usd,
-            sol_in: cfg.sol_per_trade,
+            sol_in: trade_sol,
             tokens,
             opened_at: now_unix(),
             last_price_usd: None,
@@ -490,7 +507,7 @@ pub async fn run(
             signal_id: sig.id.clone(),
             mint: sig.mint.clone(),
             mode: "dry_run".into(),
-            sol_amount: cfg.sol_per_trade,
+            sol_amount: trade_sol,
             signature: None,
             landed_ms: None,
             error: None,
@@ -687,6 +704,7 @@ async fn execute_sell(
 async fn dry_run_quote(
     rpc: Option<&solana_client::nonblocking::rpc_client::RpcClient>,
     sig: &Signal,
+    trade_sol: f64,
     cfg: &TraderConfig,
     cache: &mut QuoteCache,
 ) -> Option<Result<(u64, u64), String>> {
@@ -698,7 +716,7 @@ async fn dry_run_quote(
         }
     }
     let mint: solami::Pubkey = sig.mint.parse().ok()?;
-    let lamports = (cfg.sol_per_trade * LAMPORTS_PER_SOL as f64) as u64;
+    let lamports = (trade_sol * LAMPORTS_PER_SOL as f64) as u64;
     let result = swap::quote_buy(rpc, &mint, &sig.dex, lamports, cfg.slippage_bps)
         .await
         .map_err(|e| format!("{e:#}"));
@@ -709,11 +727,12 @@ async fn dry_run_quote(
 async fn execute_live(
     exec: &LiveExecutor,
     sig: &Signal,
+    trade_sol: f64,
     cfg: &TraderConfig,
 ) -> Result<(solami::Signature, u64, u64)> {
     let payer = exec.keypair.pubkey();
     let mint: solami::Pubkey = sig.mint.parse().context("invalid mint pubkey")?;
-    let lamports = (cfg.sol_per_trade * LAMPORTS_PER_SOL as f64) as u64;
+    let lamports = (trade_sol * LAMPORTS_PER_SOL as f64) as u64;
 
     let quote = swap::build_buy_ixs(&exec.client, &payer, &mint, &sig.dex, lamports, cfg.slippage_bps)
         .await
@@ -906,5 +925,53 @@ mod tests {
         assert_eq!(store.load_from_jsonl(&path), 1);
         assert_eq!(store.records.read().unwrap().len(), 1);
         std::fs::remove_file(&path).ok();
+    }
+
+    fn signal(smart_buy_sol: f64, smart_buy_usd: f64, wallet_multiplier: f64) -> Signal {
+        Signal {
+            id: "sig-1".into(),
+            mint: "mint".into(),
+            symbol: None,
+            name: None,
+            dex: "pump.fun".into(),
+            trigger: "smart_money_buy".into(),
+            trigger_wallets: vec![],
+            price_usd: 0.001,
+            buy_volume_usd: 0.0,
+            sell_volume_usd: 0.0,
+            buy_count: 0,
+            sell_count: 0,
+            unique_traders: 0,
+            risk_score: 0.0,
+            risk_factors: vec![],
+            top10_holder_pct: None,
+            smart_buy_sol,
+            smart_buy_usd,
+            wallet_style: None,
+            wallet_multiplier,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn size_multiplier_tiers_by_smart_buy_size() {
+        assert_eq!(size_multiplier(&signal(0.0, 0.0, 1.0)), 1.0);
+        assert_eq!(size_multiplier(&signal(1.99, 0.0, 1.0)), 1.0);
+        assert_eq!(size_multiplier(&signal(2.0, 0.0, 1.0)), 1.25);
+        assert_eq!(size_multiplier(&signal(4.99, 0.0, 1.0)), 1.25);
+        assert_eq!(size_multiplier(&signal(5.0, 0.0, 1.0)), 1.5);
+        // USD side (Blur path) uses the same tiers
+        assert_eq!(size_multiplier(&signal(0.0, 2_000.0, 1.0)), 1.25);
+        assert_eq!(size_multiplier(&signal(0.0, 5_000.0, 1.0)), 1.5);
+        // either side reaching a tier counts
+        assert_eq!(size_multiplier(&signal(0.1, 6_000.0, 1.0)), 1.5);
+    }
+
+    #[test]
+    fn size_multiplier_stacks_wallet_boost_and_caps_at_2_5() {
+        assert_eq!(size_multiplier(&signal(0.0, 0.0, 1.5)), 1.5);
+        assert_eq!(size_multiplier(&signal(2.0, 0.0, 1.5)), 1.875); // 1.25 * 1.5
+        assert_eq!(size_multiplier(&signal(5.0, 0.0, 1.5)), 2.25); // 1.5 * 1.5
+        assert_eq!(size_multiplier(&signal(5.0, 0.0, 2.0)), 2.5); // capped
     }
 }

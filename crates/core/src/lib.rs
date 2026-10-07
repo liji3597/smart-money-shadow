@@ -330,7 +330,7 @@ impl Serialize for DexEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signal {
     pub id: String,
     pub mint: String,
@@ -352,17 +352,41 @@ pub struct Signal {
     pub risk_factors: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top10_holder_pct: Option<f64>,
+    /// Size of the triggering smart-money buy in SOL (gRPC wallet-track path;
+    /// 0 when unknown). Feeds the trader's tiered position sizing.
+    #[serde(default)]
+    pub smart_buy_sol: f64,
+    /// Size of the triggering smart-money buy in USD (Blur path; 0 when
+    /// unknown).
+    #[serde(default)]
+    pub smart_buy_usd: f64,
+    /// Triggering wallet's profiled style ("scalper" | "swing"); absent for
+    /// surge signals and unprofiled wallets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_style: Option<String>,
+    /// Wallet-quality multiplier from the profiler (1.0 neutral, 1.5 proven
+    /// winner). Multiplied with the size tier by the trader, capped at 2.5.
+    #[serde(default = "default_wallet_multiplier")]
+    pub wallet_multiplier: f64,
     pub created_at: i64,
 }
 
-/// A smart-money buy detected natively on-chain via the Yellowstone gRPC
-/// wallet tracker (token-balance deltas), independent of Blur decoding.
+fn default_wallet_multiplier() -> f64 {
+    1.0
+}
+
+/// A smart-money trade (buy or sell) detected natively on-chain via the
+/// Yellowstone gRPC wallet tracker (token-balance deltas), independent of
+/// Blur decoding. Sells feed the wallet profiler's round-trip stats.
 #[derive(Debug, Clone, Serialize)]
-pub struct WalletBuy {
+pub struct WalletTrade {
     pub wallet: String,
     pub mint: String,
-    /// Estimated SOL spent (SOL + WSOL outflow; 0 when the quote was USDC/USDT).
-    pub sol_spent: f64,
+    /// "buy" or "sell".
+    pub side: String,
+    /// Estimated SOL spent (buy) / received (sell): SOL + WSOL leg; 0 when the
+    /// quote side was USDC/USDT.
+    pub sol_amount: f64,
     pub slot: u64,
     pub signature: String,
     /// DEX name inferred from the transaction's program ids, "" if unknown.

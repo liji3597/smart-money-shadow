@@ -9,10 +9,26 @@ pub struct Config {
     pub smart_money_seeds: Vec<String>,
     pub smart_discovery: bool,
     pub min_smart_buy_usd: f64,
+    /// Drop signals whose triggering smart-money buy exceeds this (USD,
+    /// Blur path) — a buy that big means the trade is already crowded.
+    pub max_smart_buy_usd: f64,
     pub min_signal_volume_usd: f64,
+    /// Drop signals whose window buy volume exceeds this (USD) — late-stage.
+    pub max_signal_volume_usd: f64,
     pub min_smart_buy_sol: f64,
+    /// Drop signals whose triggering smart-money buy exceeds this (SOL,
+    /// gRPC wallet-track path).
+    pub max_smart_buy_sol: f64,
     pub signal_cooldown_secs: i64,
     pub surge_min_multiple: f64,
+    /// Wallet profiler: let under-sampled wallets through at 1x (cold start).
+    pub follow_unknown_wallets: bool,
+    /// Round trips required before a wallet's win rate gates its signals.
+    pub min_wallet_round_trips: u32,
+    /// Below this win rate (with enough samples) a wallet's signals are dropped.
+    pub min_wallet_win_rate: f64,
+    /// Wallet profile persistence file.
+    pub wallet_profiles_path: String,
     pub live_trading: bool,
     pub trade_sol_per_signal: f64,
     pub max_daily_sol: f64,
@@ -59,10 +75,17 @@ impl Config {
             smart_money_seeds: env_list("SMART_MONEY_SEEDS", &[]),
             smart_discovery: env_bool("SMART_DISCOVERY", true),
             min_smart_buy_usd: env_f64("MIN_SMART_BUY_USD", 500.0),
+            max_smart_buy_usd: env_f64("MAX_SMART_BUY_USD", 20_000.0),
             min_signal_volume_usd: env_f64("MIN_SIGNAL_VOLUME_USD", 5_000.0),
+            max_signal_volume_usd: env_f64("MAX_SIGNAL_VOLUME_USD", 250_000.0),
             min_smart_buy_sol: env_f64("MIN_SMART_BUY_SOL", 0.5),
+            max_smart_buy_sol: env_f64("MAX_SMART_BUY_SOL", 20.0),
             signal_cooldown_secs: env_i64("SIGNAL_COOLDOWN_SECS", 900),
             surge_min_multiple: env_f64("SURGE_MIN_MULTIPLE", 4.0),
+            follow_unknown_wallets: env_bool("FOLLOW_UNKNOWN_WALLETS", true),
+            min_wallet_round_trips: env_u64("MIN_WALLET_ROUND_TRIPS", 3) as u32,
+            min_wallet_win_rate: env_f64("MIN_WALLET_WIN_RATE", 0.40),
+            wallet_profiles_path: env_or("WALLET_PROFILES_PATH", "wallet_profiles.json"),
             live_trading: env_bool("LIVE_TRADING", false),
             trade_sol_per_signal: env_f64("TRADE_SOL_PER_SIGNAL", 0.02),
             max_daily_sol: env_f64("MAX_DAILY_SOL", 0.2),

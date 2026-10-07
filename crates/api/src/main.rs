@@ -11,7 +11,7 @@ use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use shadow_core::{DexEvent, WalletBuy};
+use shadow_core::{DexEvent, WalletTrade};
 use shadow_engine::{Engine, EngineConfig};
 use shadow_ingest::{run_blur, BlurRest, StreamHealth};
 use shadow_trader::{TradeStore, TraderConfig};
@@ -56,11 +56,18 @@ async fn main() -> Result<()> {
     let engine = Engine::new(
         EngineConfig {
             min_smart_buy_usd: cfg.min_smart_buy_usd,
+            max_smart_buy_usd: cfg.max_smart_buy_usd,
             min_signal_volume_usd: cfg.min_signal_volume_usd,
+            max_signal_volume_usd: cfg.max_signal_volume_usd,
             min_smart_buy_sol: cfg.min_smart_buy_sol,
+            max_smart_buy_sol: cfg.max_smart_buy_sol,
             signal_cooldown_secs: cfg.signal_cooldown_secs,
             surge_min_multiple: cfg.surge_min_multiple,
             smart_discovery: cfg.smart_discovery,
+            follow_unknown_wallets: cfg.follow_unknown_wallets,
+            min_wallet_round_trips: cfg.min_wallet_round_trips,
+            min_wallet_win_rate: cfg.min_wallet_win_rate,
+            wallet_profiles_path: cfg.wallet_profiles_path.clone(),
             ..Default::default()
         },
         &cfg.api_key,
@@ -86,7 +93,7 @@ async fn main() -> Result<()> {
     }
 
     // gRPC wallet track → engine
-    let (track_tx, _) = broadcast::channel::<Arc<WalletBuy>>(1024);
+    let (track_tx, _) = broadcast::channel::<Arc<WalletTrade>>(1024);
     let track_health = StreamHealth::default();
     if cfg.grpc_wallet_track {
         tokio::spawn(shadow_ingest::run_wallet_track(

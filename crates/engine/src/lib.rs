@@ -12,8 +12,12 @@ use dashmap::DashMap;
 use tokio::sync::{broadcast, watch};
 use tracing::{info, warn};
 
-use shadow_core::{now_unix, DexEvent, Metrics, Signal, TokenInfo, WalletBuy};
+use shadow_core::{now_unix, DexEvent, Metrics, Signal, TokenInfo, WalletTrade};
 use shadow_ingest::BlurRest;
+
+use wallet_profiler::{Gate, WalletProfiler};
+
+pub mod wallet_profiler;
 
 const MAX_SIGNALS: usize = 500;
 const RATE_WINDOW_CAP: usize = 5000;
@@ -39,32 +43,69 @@ fn is_signable_mint(mint: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub min_smart_buy_usd: f64,
+    /// Blur path: a single smart-money buy above this (USD) reads as a
+    /// crowded, late trade — drop the signal.
+    pub max_smart_buy_usd: f64,
     /// Minimum cumulative buy volume (USD) on the token before any signal
     /// fires; also applied to a surge's `volume_window_usd`.
     pub min_signal_volume_usd: f64,
+    /// Window buy volume above this (USD) means the token is already
+    /// late-stage — drop the signal. Applied on both detection paths.
+    pub max_signal_volume_usd: f64,
     /// Minimum SOL spent for a gRPC wallet-track buy to signal (that path has
     /// no USD valuation at detection time).
     pub min_smart_buy_sol: f64,
+    /// gRPC path: a single smart-money buy above this (SOL) reads as a
+    /// crowded, late trade — drop the signal.
+    pub max_smart_buy_sol: f64,
     pub signal_cooldown_secs: i64,
     pub surge_min_multiple: f64,
     pub smart_discovery: bool,
     pub discovery_interval_secs: u64,
     pub max_tracked_tokens: usize,
+    /// Let wallets with too few profiled round trips through at 1x (cold
+    /// start). false blocks them until the sample is big enough.
+    pub follow_unknown_wallets: bool,
+    /// Round trips required before a wallet's win rate gates its signals.
+    pub min_wallet_round_trips: u32,
+    /// Below this win rate (with enough samples) a wallet is blocked.
+    pub min_wallet_win_rate: f64,
+    /// Wallet profile persistence file ("" disables persistence).
+    pub wallet_profiles_path: String,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         EngineConfig {
             min_smart_buy_usd: 500.0,
+            max_smart_buy_usd: 20_000.0,
             min_signal_volume_usd: 5_000.0,
+            max_signal_volume_usd: 250_000.0,
             min_smart_buy_sol: 0.5,
+            max_smart_buy_sol: 20.0,
             signal_cooldown_secs: 900,
             surge_min_multiple: 4.0,
             smart_discovery: true,
             discovery_interval_secs: 1800,
             max_tracked_tokens: 5000,
+            follow_unknown_wallets: true,
+            min_wallet_round_trips: 3,
+            min_wallet_win_rate: 0.40,
+            wallet_profiles_path: "wallet_profiles.json".into(),
         }
     }
+}
+
+/// A single smart-money buy above the cap reads as a crowded, late trade.
+/// Only the populated side counts: the gRPC path knows SOL, the Blur path USD.
+fn smart_buy_too_large(sol: f64, usd: f64, max_sol: f64, max_usd: f64) -> bool {
+    (sol > 0.0 && sol > max_sol) || (usd > 0.0 && usd > max_usd)
+}
+
+/// Window volume must sit inside [min, max]: below min is noise, above max
+/// is a late-stage pump.
+fn window_volume_outside(volume: f64, min: f64, max: f64) -> bool {
+    volume < min || volume > max
 }
 
 pub struct EngineState {
@@ -84,6 +125,17 @@ pub struct EngineState {
     pub wallet_balance_lamports: Arc<AtomicU64>,
 }
 
+/// Everything a detection path knows about the triggering trade beyond the
+/// token itself. Bundled so `maybe_signal`/`emit_signal` stay readable.
+struct TriggerContext {
+    price: f64,
+    dex: String,
+    smart_buy_sol: f64,
+    smart_buy_usd: f64,
+    wallet_multiplier: f64,
+    wallet_style: Option<String>,
+}
+
 pub struct Engine {
     pub state: Arc<EngineState>,
     cfg: EngineConfig,
@@ -91,6 +143,8 @@ pub struct Engine {
     rpc: solami::Solami<solami::On<solami::RpcKit>, solami::Off, solami::Off>,
     rest: BlurRest,
     signal_seq: AtomicU64,
+    /// Per-wallet round-trip stats; gates and sizes copy trades.
+    pub profiler: WalletProfiler,
 }
 
 impl Engine {
@@ -125,12 +179,21 @@ impl Engine {
             beam_latency_ms: Arc::new(AtomicU64::new(0)),
             wallet_balance_lamports: Arc::new(AtomicU64::new(0)),
         });
+        let profiler = WalletProfiler::new(
+            if cfg.wallet_profiles_path.is_empty() {
+                None
+            } else {
+                Some(cfg.wallet_profiles_path.clone())
+            },
+        );
+        profiler.restore();
         Ok(Arc::new(Engine {
             state,
             cfg,
             rpc,
             rest,
             signal_seq: AtomicU64::new(0),
+            profiler,
         }))
     }
 
@@ -150,11 +213,11 @@ impl Engine {
         }
     }
 
-    /// Consume gRPC wallet-track buys forever.
-    pub async fn run_track(self: Arc<Self>, mut rx: broadcast::Receiver<Arc<WalletBuy>>) {
+    /// Consume gRPC wallet-track trades (buys and sells) forever.
+    pub async fn run_track(self: Arc<Self>, mut rx: broadcast::Receiver<Arc<WalletTrade>>) {
         loop {
             match rx.recv().await {
-                Ok(buy) => self.handle_wallet_buy(&buy),
+                Ok(trade) => self.handle_wallet_trade(&trade),
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(skipped = n, "engine lagged behind wallet-track")
                 }
@@ -163,34 +226,64 @@ impl Engine {
         }
     }
 
-    fn handle_wallet_buy(self: &Arc<Self>, buy: &WalletBuy) {
+    fn handle_wallet_trade(self: &Arc<Self>, trade: &WalletTrade) {
+        // Every tracked wallet's trades feed the profiler, signal or not —
+        // the win rate must reflect the wallet's real behavior.
+        if trade.side == "sell" {
+            self.profiler
+                .record_sell(&trade.wallet, &trade.mint, trade.sol_amount, now_unix());
+            return;
+        }
+        self.profiler
+            .record_buy(&trade.wallet, &trade.mint, trade.sol_amount, now_unix());
         self.state.metrics.write().unwrap().grpc_wallet_buys_total += 1;
-        let price = {
+        let (price, window_buy_usd) = {
             let mut t = self
                 .state
                 .tokens
-                .entry(buy.mint.clone())
-                .or_insert_with(|| TokenInfo::new(&buy.mint));
+                .entry(trade.mint.clone())
+                .or_insert_with(|| TokenInfo::new(&trade.mint));
             t.last_activity = now_unix();
-            t.traders.insert(buy.wallet.clone());
-            if !buy.dex.is_empty() {
-                t.dex = buy.dex.clone();
+            t.traders.insert(trade.wallet.clone());
+            if !trade.dex.is_empty() {
+                t.dex = trade.dex.clone();
             }
-            t.price_usd
+            (t.price_usd, t.buy_volume_usd)
         };
         self.evict_tokens_if_full();
         // Same weight as the Blur path; cooldown dedup happens in maybe_signal.
-        if self.state.smart.read().unwrap().contains(&buy.wallet) {
-            if buy.sol_spent < self.cfg.min_smart_buy_sol {
+        if self.state.smart.read().unwrap().contains(&trade.wallet) {
+            if trade.sol_amount < self.cfg.min_smart_buy_sol {
                 self.state.metrics.write().unwrap().signals_filtered_total += 1;
                 return;
             }
+            if trade.sol_amount > self.cfg.max_smart_buy_sol {
+                self.state.metrics.write().unwrap().signals_filtered_total += 1;
+                return;
+            }
+            if window_buy_usd > self.cfg.max_signal_volume_usd {
+                self.state.metrics.write().unwrap().signals_filtered_total += 1;
+                return;
+            }
+            let wallet_multiplier = match self.profiler.gate(&trade.wallet, &self.cfg) {
+                Gate::Pass(m) => m,
+                Gate::Block => {
+                    self.state.metrics.write().unwrap().signals_filtered_total += 1;
+                    return;
+                }
+            };
             self.maybe_signal(
-                &buy.mint,
+                &trade.mint,
                 "smart_money_buy",
-                vec![buy.wallet.clone()],
-                price,
-                &buy.dex,
+                vec![trade.wallet.clone()],
+                TriggerContext {
+                    price,
+                    dex: trade.dex.clone(),
+                    smart_buy_sol: trade.sol_amount,
+                    smart_buy_usd: 0.0,
+                    wallet_multiplier,
+                    wallet_style: self.profiler.style(&trade.wallet),
+                },
             );
         }
     }
@@ -274,22 +367,48 @@ impl Engine {
 
                 let is_smart = self.state.smart.read().unwrap().contains(&s.trader);
                 if is_smart && s.side == "buy" && s.volume_usd >= self.cfg.min_smart_buy_usd {
+                    if smart_buy_too_large(
+                        0.0,
+                        s.volume_usd,
+                        self.cfg.max_smart_buy_sol,
+                        self.cfg.max_smart_buy_usd,
+                    ) {
+                        self.state.metrics.write().unwrap().signals_filtered_total += 1;
+                        return;
+                    }
                     let window_buy_usd = self
                         .state
                         .tokens
                         .get(&s.mint)
                         .map(|t| t.buy_volume_usd)
                         .unwrap_or(0.0);
-                    if window_buy_usd < self.cfg.min_signal_volume_usd {
+                    if window_volume_outside(
+                        window_buy_usd,
+                        self.cfg.min_signal_volume_usd,
+                        self.cfg.max_signal_volume_usd,
+                    ) {
                         self.state.metrics.write().unwrap().signals_filtered_total += 1;
                         return;
                     }
+                    let wallet_multiplier = match self.profiler.gate(&s.trader, &self.cfg) {
+                        Gate::Pass(m) => m,
+                        Gate::Block => {
+                            self.state.metrics.write().unwrap().signals_filtered_total += 1;
+                            return;
+                        }
+                    };
                     self.maybe_signal(
                         &s.mint,
                         "smart_money_buy",
                         vec![s.trader.clone()],
-                        s.price_usd,
-                        &s.dex,
+                        TriggerContext {
+                            price: s.price_usd,
+                            dex: s.dex.clone(),
+                            smart_buy_sol: 0.0,
+                            smart_buy_usd: s.volume_usd,
+                            wallet_multiplier,
+                            wallet_style: self.profiler.style(&s.trader),
+                        },
                     );
                 }
             }
@@ -347,7 +466,11 @@ impl Engine {
             }
             DexEvent::Surge(s) => {
                 if s.multiple >= self.cfg.surge_min_multiple {
-                    if s.volume_window_usd < self.cfg.min_signal_volume_usd {
+                    if window_volume_outside(
+                        s.volume_window_usd,
+                        self.cfg.min_signal_volume_usd,
+                        self.cfg.max_signal_volume_usd,
+                    ) {
                         self.state.metrics.write().unwrap().signals_filtered_total += 1;
                         return;
                     }
@@ -355,8 +478,14 @@ impl Engine {
                         &s.mint,
                         "volume_surge",
                         vec![],
-                        s.price_at_trigger,
-                        "",
+                        TriggerContext {
+                            price: s.price_at_trigger,
+                            dex: String::new(),
+                            smart_buy_sol: 0.0,
+                            smart_buy_usd: 0.0,
+                            wallet_multiplier: 1.0,
+                            wallet_style: None,
+                        },
                     );
                 }
             }
@@ -400,8 +529,7 @@ impl Engine {
         mint: &str,
         trigger: &str,
         wallets: Vec<String>,
-        price: f64,
-        dex: &str,
+        ctx: TriggerContext,
     ) {
         if !is_signable_mint(mint) {
             return;
@@ -417,9 +545,8 @@ impl Engine {
         let engine = Arc::clone(self);
         let mint = mint.to_owned();
         let trigger = trigger.to_owned();
-        let dex = dex.to_owned();
         tokio::spawn(async move {
-            engine.emit_signal(mint, trigger, wallets, price, dex).await;
+            engine.emit_signal(mint, trigger, wallets, ctx).await;
         });
     }
 
@@ -428,17 +555,16 @@ impl Engine {
         mint: String,
         trigger: String,
         wallets: Vec<String>,
-        price: f64,
-        dex: String,
+        ctx: TriggerContext,
     ) {
         // The gRPC wallet-track path has no USD price; fall back to Blur REST
         // so the signal (and its PnL tracking) still gets an entry price.
-        let price = if price > 0.0 {
-            price
+        let price = if ctx.price > 0.0 {
+            ctx.price
         } else {
             match self.rest.token_price_usd(&mint).await {
                 Ok(Some(p)) if p > 0.0 => p,
-                _ => price,
+                _ => ctx.price,
             }
         };
         let concentration = self.top10_concentration(&mint).await;
@@ -530,7 +656,7 @@ impl Engine {
             mint: mint.clone(),
             symbol,
             name,
-            dex,
+            dex: ctx.dex,
             trigger,
             trigger_wallets: wallets,
             price_usd: price,
@@ -542,6 +668,10 @@ impl Engine {
             risk_score: score,
             risk_factors: factors,
             top10_holder_pct: top10,
+            smart_buy_sol: ctx.smart_buy_sol,
+            smart_buy_usd: ctx.smart_buy_usd,
+            wallet_style: ctx.wallet_style,
+            wallet_multiplier: ctx.wallet_multiplier,
             created_at: now_unix(),
         };
         info!(
@@ -624,5 +754,27 @@ mod tests {
         // Exact-match filter: a near-miss is not filtered.
         assert!(is_signable_mint("So11111111111111111111111111111111111111112 "));
         assert!(is_signable_mint("so11111111111111111111111111111111111111112"));
+    }
+
+    #[test]
+    fn smart_buy_cap_uses_the_populated_side() {
+        let cfg = EngineConfig::default();
+        // gRPC path: SOL-denominated
+        assert!(!smart_buy_too_large(20.0, 0.0, cfg.max_smart_buy_sol, cfg.max_smart_buy_usd));
+        assert!(smart_buy_too_large(20.1, 0.0, cfg.max_smart_buy_sol, cfg.max_smart_buy_usd));
+        // Blur path: USD-denominated
+        assert!(!smart_buy_too_large(0.0, 20_000.0, cfg.max_smart_buy_sol, cfg.max_smart_buy_usd));
+        assert!(smart_buy_too_large(0.0, 20_001.0, cfg.max_smart_buy_sol, cfg.max_smart_buy_usd));
+        // 0 on one side must not trip that side's cap (unknown ≠ huge)
+        assert!(!smart_buy_too_large(0.0, 0.0, cfg.max_smart_buy_sol, cfg.max_smart_buy_usd));
+    }
+
+    #[test]
+    fn window_volume_must_sit_inside_min_and_max() {
+        let cfg = EngineConfig::default();
+        assert!(window_volume_outside(4_999.0, cfg.min_signal_volume_usd, cfg.max_signal_volume_usd));
+        assert!(!window_volume_outside(5_000.0, cfg.min_signal_volume_usd, cfg.max_signal_volume_usd));
+        assert!(!window_volume_outside(250_000.0, cfg.min_signal_volume_usd, cfg.max_signal_volume_usd));
+        assert!(window_volume_outside(250_001.0, cfg.min_signal_volume_usd, cfg.max_signal_volume_usd));
     }
 }
