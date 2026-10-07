@@ -166,7 +166,9 @@ pub struct BuyQuote {
     pub ixs: Vec<Instruction>,
 }
 
-/// Full buy construction for live mode.
+/// Full buy construction for live mode. A pump.fun mint whose bonding curve
+/// has completed is re-routed to PumpSwap automatically (the pool exists
+/// post-graduation), mirroring the sell path.
 pub async fn build_buy_ixs(
     rpc: &RpcClient,
     payer: &Pubkey,
@@ -176,7 +178,7 @@ pub async fn build_buy_ixs(
     slippage_bps: u64,
 ) -> Result<BuyQuote> {
     match plan_for_dex(dex, &mint.to_string()) {
-        SwapPlan::Pumpfun => pumpfun_buy(rpc, Some(payer), mint, lamports_in, slippage_bps).await,
+        SwapPlan::Pumpfun => pumpfun_route_buy(rpc, Some(payer), mint, lamports_in, slippage_bps).await,
         SwapPlan::Pumpswap => pumpswap_buy(rpc, Some(payer), mint, lamports_in, slippage_bps).await,
         SwapPlan::Unsupported => Err(unsupported(dex)),
     }
@@ -191,7 +193,7 @@ pub async fn quote_buy(
     slippage_bps: u64,
 ) -> Result<(u64, u64)> {
     let quote = match plan_for_dex(dex, &mint.to_string()) {
-        SwapPlan::Pumpfun => pumpfun_buy(rpc, None, mint, lamports_in, slippage_bps).await?,
+        SwapPlan::Pumpfun => pumpfun_route_buy(rpc, None, mint, lamports_in, slippage_bps).await?,
         SwapPlan::Pumpswap => pumpswap_buy(rpc, None, mint, lamports_in, slippage_bps).await?,
         SwapPlan::Unsupported => return Err(unsupported(dex)),
     };
@@ -341,7 +343,50 @@ async fn mint_token_program(rpc: &RpcClient, mint: &Pubkey) -> Pubkey {
     }
 }
 
-async fn pumpfun_buy(
+/// Fetch and parse the pump.fun bonding curve for `mint`. This is the
+/// network edge of the buy-routing decision; everything downstream of it
+/// (route_buy, graduated_buy_error) is pure and unit-tested.
+async fn fetch_bonding_curve(rpc: &RpcClient, mint: &Pubkey) -> Result<(Pubkey, BondingCurve)> {
+    let curve_addr = pda(&[b"bonding-curve", mint.as_ref()], &PUMPFUN_PROGRAM);
+    let account = rpc
+        .get_account(&curve_addr)
+        .await
+        .with_context(|| format!("fetch bonding curve {curve_addr}"))?;
+    if account.owner != PUMPFUN_PROGRAM {
+        bail!("bonding curve {curve_addr} has unexpected owner {}", account.owner);
+    }
+    Ok((curve_addr, parse_bonding_curve(&account.data)?))
+}
+
+/// Venue a pump.fun-mint buy routes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuyRoute {
+    Pumpfun,
+    Pumpswap,
+}
+
+/// Buy routing from the curve state: an active bonding curve serves the buy;
+/// a graduated one moves to PumpSwap (the pool exists post-graduation).
+/// Pool discovery stays inside the PumpSwap path — probing it here would
+/// double the RPC cost of every live-curve buy.
+fn route_buy(curve_complete: bool) -> BuyRoute {
+    if curve_complete {
+        BuyRoute::Pumpswap
+    } else {
+        BuyRoute::Pumpfun
+    }
+}
+
+/// A graduated curve whose PumpSwap fallback also failed is unbuyable — say
+/// so in one message instead of surfacing a bare "no PumpSwap pool found".
+fn graduated_buy_error(mint: &Pubkey, e: &anyhow::Error) -> anyhow::Error {
+    anyhow!("bonding curve complete (graduated); PumpSwap buy unavailable for mint {mint}: {e:#}")
+}
+
+/// pump.fun buy entry point: routes through the bonding curve while it is
+/// active, falls back to PumpSwap after graduation. Shared by `quote_buy`
+/// and `build_buy_ixs` so a quote can never disagree with execution.
+async fn pumpfun_route_buy(
     rpc: &RpcClient,
     payer: Option<&Pubkey>,
     mint: &Pubkey,
@@ -351,23 +396,33 @@ async fn pumpfun_buy(
     if lamports_in == 0 {
         bail!("amount cannot be zero");
     }
-    let curve_addr = pda(&[b"bonding-curve", mint.as_ref()], &PUMPFUN_PROGRAM);
-    let account = rpc
-        .get_account(&curve_addr)
-        .await
-        .with_context(|| format!("fetch bonding curve {curve_addr}"))?;
-    if account.owner != PUMPFUN_PROGRAM {
-        bail!("bonding curve {curve_addr} has unexpected owner {}", account.owner);
+    let (curve_addr, curve) = fetch_bonding_curve(rpc, mint).await?;
+    match route_buy(curve.complete) {
+        BuyRoute::Pumpfun => {
+            pumpfun_buy(rpc, payer, mint, &curve_addr, &curve, lamports_in, slippage_bps).await
+        }
+        BuyRoute::Pumpswap => pumpswap_buy(rpc, payer, mint, lamports_in, slippage_bps)
+            .await
+            .map_err(|e| graduated_buy_error(mint, &e)),
     }
-    let curve = parse_bonding_curve(&account.data)?;
-    if curve.complete {
-        bail!("bonding curve complete (graduated); buy on pumpswap instead");
-    }
+}
+
+/// Build a pump.fun bonding-curve buy from an already-fetched curve
+/// (graduated curves never reach here — see `route_buy`).
+async fn pumpfun_buy(
+    rpc: &RpcClient,
+    payer: Option<&Pubkey>,
+    mint: &Pubkey,
+    curve_addr: &Pubkey,
+    curve: &BondingCurve,
+    lamports_in: u64,
+    slippage_bps: u64,
+) -> Result<BuyQuote> {
     if curve.quote_mint != Pubkey::default() && curve.quote_mint != WSOL_MINT {
         bail!("pumpfun curve is {}-quoted, only SOL quotes supported", curve.quote_mint);
     }
 
-    let expected_tokens = pumpfun_expected_tokens(&curve, lamports_in);
+    let expected_tokens = pumpfun_expected_tokens(curve, lamports_in);
     if expected_tokens == 0 {
         bail!("pumpfun quote is zero for {lamports_in} lamports");
     }
@@ -395,9 +450,9 @@ async fn pumpfun_buy(
             PUMPFUN_GLOBAL_META,                                   // 0  global
             AccountMeta::new(fee_recipient, false),                // 1  fee_recipient
             AccountMeta::new_readonly(*mint, false),               // 2  mint
-            AccountMeta::new(curve_addr, false),                   // 3  bonding_curve
+            AccountMeta::new(*curve_addr, false),                  // 3  bonding_curve
             AccountMeta::new(                                      // 4  associated_bonding_curve
-                associated_token_address(&curve_addr, mint, &token_program),
+                associated_token_address(curve_addr, mint, &token_program),
                 false,
             ),
             AccountMeta::new(user_token_account, false),           // 5  associated_user
@@ -1191,6 +1246,32 @@ mod tests {
             plan_for_dex("raydium", "9Qmz39S4LvrtsBg9MuUPgdZKfXoYYcggZKjAsFQ7pump"),
             SwapPlan::Unsupported
         ));
+    }
+
+    // ---- buy routing (graduation fallback) -----------------------------------
+
+    #[test]
+    fn route_buy_active_curve_stays_on_pumpfun() {
+        assert_eq!(route_buy(false), BuyRoute::Pumpfun);
+    }
+
+    #[test]
+    fn route_buy_graduated_curve_moves_to_pumpswap() {
+        assert_eq!(route_buy(true), BuyRoute::Pumpswap);
+    }
+
+    #[test]
+    fn graduated_buy_error_names_both_venues_and_the_mint() {
+        let mint = Pubkey::new_unique();
+        let inner = anyhow!("no PumpSwap pool found for mint {mint}");
+        let e = graduated_buy_error(&mint, &inner);
+        assert!(e.to_string().contains("bonding curve complete"));
+        assert!(e.to_string().contains("PumpSwap"));
+        assert!(e.to_string().contains(&mint.to_string()));
+        // the underlying pool-lookup reason stays attached
+        assert!(format!("{e:#}").contains("no PumpSwap pool found"));
+        // still classifies as a graduation error for is_graduated callers
+        assert!(is_graduated(&e));
     }
 
     // ---- compute_fee -------------------------------------------------------
